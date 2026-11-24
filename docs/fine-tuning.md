@@ -82,10 +82,14 @@ where the reference energy is near zero the ratio diverges and the top
 eigenvectors would be estimation noise.
 
 The reference loader is built the same way the `kfac_ggn` and `ekfac_ggn`
-regularizers build theirs, so `reference_datasets` takes the same task names
-(ImageNet21KP by default). The reference statistics use a label-free probe
+regularizers build theirs, so `reference_datasets` takes the same task names.
+The preset uses `ImageNet1KWds`, the ungated `clip-benchmark/wds_imagenet1k`
+mirror, because `ImageNet1K` points at the gated `ILSVRC/imagenet-1k` and
+`ImageNet21KP` is a large download; `ImageNet21KP` remains available and is
+what DELTA and TAK use. The reference statistics use a label-free probe
 rᵀf(x) with a fresh random r per batch, which is why a reference set whose
-label space the task head cannot score still works.
+label space the task head cannot score still works — and why the mirror's
+small split is enough, since a reference estimate reads a few thousand images.
 
 | `strategy.params.subspace` | Default | Meaning |
 |-----|-----|-----|

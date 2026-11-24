@@ -59,7 +59,7 @@ common:
         reference_batches: 0          # 0 = same as batches
         # Must NOT be one of the tasks being merged.
         reference_datasets:
-          - ImageNet21KP
+          - ImageNet1KWds
         one_sided: false
         no_reference: false
         include_non_matrices: false
@@ -77,7 +77,7 @@ common:
       - subspace
       - vision8
       - vitb32
-      - imagenet21kp-ref
+      - imagenet1k-ref
     mode: online
     local_log_dir: .log
     log_every_n_steps: 50

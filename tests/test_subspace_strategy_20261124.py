@@ -394,3 +394,47 @@ class StrategyWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReferenceDatasetTest(unittest.TestCase):
+    """The reference set must be resolvable and must not be a merged task."""
+
+    def test_the_imagenet_mirror_resolves(self):
+        from merge_and_rebase.eval.datasets.vision8_14_20 import (
+            VISION8_TASKS,
+            VISION_SUPPORTED_TASKS,
+            _vision_spec,
+        )
+
+        self.assertIn("ImageNet1KWds", VISION_SUPPORTED_TASKS)
+        path, config, splits = _vision_spec("ImageNet1KWds")
+        self.assertEqual(path, "clip-benchmark/wds_imagenet1k")
+        self.assertIsNone(config)
+        self.assertEqual(set(splits), {"train", "test"})
+        # Both keys point at the mirror's small split on purpose: this task only
+        # ever supplies images for statistics.
+        self.assertEqual(set(splits.values()), {"test"})
+        # A reference set that is one of the merged tasks would leak.
+        self.assertNotIn("ImageNet1KWds", VISION8_TASKS)
+
+    def test_the_shipped_config_uses_a_resolvable_reference(self):
+        import re
+
+        from merge_and_rebase.eval.datasets.vision8_14_20 import (
+            VISION8_TASKS,
+            _vision_spec,
+        )
+
+        config = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/configs/SUBSPACE"
+            / "vision-subspace-vitb32-vision8.yaml"
+        )
+        text = config.read_text()
+        block = re.search(r"reference_datasets:\s*\n((?:\s*-\s*\S+\n)+)", text)
+        self.assertIsNotNone(block, "the preset declares no reference_datasets")
+        names = re.findall(r"-\s*(\S+)", block.group(1))
+        self.assertTrue(names)
+        for name in names:
+            _vision_spec(name)
+            self.assertNotIn(name, VISION8_TASKS)

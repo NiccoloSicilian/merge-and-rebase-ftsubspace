@@ -14,7 +14,7 @@ class SuiteSpec:
 VISION8_TASKS = ["Cars", "DTD", "EuroSAT", "GTSRB", "MNIST", "RESISC45", "SUN397", "SVHN"]
 VISION14_TASKS = VISION8_TASKS + ["CIFAR100", "STL10", "Flowers102", "OxfordIIITPet", "PCAM", "FER2013"]
 VISION20_TASKS = VISION14_TASKS + ["EMNIST", "CIFAR10", "Food101", "FashionMNIST", "RenderedSST2", "KMNIST"]
-VISION_IMAGENET_TASKS = ["ImageNet1K", "ImageNet21KP"]
+VISION_IMAGENET_TASKS = ["ImageNet1K", "ImageNet1KWds", "ImageNet21KP"]
 VISION_SUPPORTED_TASKS = VISION20_TASKS + VISION_IMAGENET_TASKS
 
 
@@ -41,6 +41,17 @@ def _vision_spec(task: str) -> tuple[str, str | None, dict[str, str]]:
         "KMNIST": ("tanganke/kmnist", None, {"train": "train", "test": "test"}),
         "SVHN": ("ufldl-stanford/svhn", "cropped_digits", {"train": "train", "test": "test"}),
         "ImageNet1K": ("ILSVRC/imagenet-1k", None, {"train": "train", "test": "validation"}),
+        # Ungated webdataset mirror, like the FER2013 entry above. ILSVRC/imagenet-1k
+        # is gated and needs an accepted licence plus a token, which makes it
+        # awkward on a compute node with no interactive login.
+        #
+        # Both split keys point at the mirror's 50k "test" split on purpose. This
+        # task exists to supply a generic image distribution for curvature and
+        # gradient statistics, never to train or evaluate on, so the usual
+        # train/val/test hygiene does not apply and the 1.28M-image train split
+        # would only cost download time: a reference estimate reads a few
+        # thousand images.
+        "ImageNet1KWds": ("clip-benchmark/wds_imagenet1k", None, {"train": "test", "test": "test"}),
         "ImageNet21KP": ("timm/imagenet-w21-p", None, {"train": "train", "test": "validation"}),
     }
     if task not in mapping:
