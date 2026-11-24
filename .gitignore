@@ -292,3 +292,4 @@ artifacts/
 
 # Local Hugging Face access tokens.
 /.hf_token*
+.github/workflows/
