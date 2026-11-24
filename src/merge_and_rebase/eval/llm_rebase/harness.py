@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+import dataclasses
+import itertools
+import json
+from pathlib import Path
+from typing import Any
+
+import torch.nn as nn
+
+
+def _patched_task_config_to_dict(self, keep_callable: bool = False) -> dict:
+    """
+    Drop-in replacement for lm_eval's TaskConfig.to_dict that avoids
+    dataclasses.asdict()'s recursive copy.deepcopy of every field.
+
+    For group tasks with many subtasks (e.g. "mmlu", 57 subjects) that deep
+    copy ends up cloning the live model object passed in via model_args once
+    per subtask (observed as a torch.nn.Parameter.__deepcopy__ crash deep
+    inside dataclasses.asdict), exhausting GPU memory even for a 1.5B model
+    on a 64GB A100. This builds the same dict shape via a shallow field copy
+    instead, which is all lm_eval actually needs here -- the result is only
+    used for the "configs" provenance section of simple_evaluate's return
+    value, never for computing scores, and this repo's run() below never
+    reads that section.
+    """
+    cfg_dict = {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+    for k, v in list(cfg_dict.items()):
+        if v is None:
+            cfg_dict.pop(k)
+        elif k == "metric_list":
+            v = [dict(d) for d in v]
+            for metric_dict in v:
+                for metric_key, metric_value in metric_dict.items():
+                    if callable(metric_value):
+                        metric_dict[metric_key] = self.serialize_function(metric_value, keep_callable=keep_callable)
+            cfg_dict[k] = v
+        elif callable(v):
+            cfg_dict[k] = self.serialize_function(v, keep_callable=keep_callable)
+    return cfg_dict
+
+
+# Fixed bookkeeping keys lm-eval attaches to every task's result dict (see
+# lm_eval.result_schema._TaskMetrics) that are not accuracy metrics and must
+# never be averaged in with real scores.
+_NON_METRIC_KEYS = frozenset({"name", "alias", "sample_len", "sample_count"})
+
+
+def _resolve_fewshot_by_task(
+    tasks: list[str], num_fewshot: int | list[int] | dict[str, int]
+) -> dict[str, int]:
+    """Normalize the various `num_fewshot` shapes to one value per task."""
+    if isinstance(num_fewshot, dict):
+        missing = [t for t in tasks if t not in num_fewshot]
+        if missing:
+            raise ValueError(f"num_fewshot dict is missing entries for tasks: {missing}")
+        return {t: int(num_fewshot[t]) for t in tasks}
+    if isinstance(num_fewshot, (list, tuple)):
+        if len(num_fewshot) != len(tasks):
+            raise ValueError(
+                f"num_fewshot list has {len(num_fewshot)} entries but there are "
+                f"{len(tasks)} tasks; they must be parallel lists."
+            )
+        return {t: int(n) for t, n in zip(tasks, num_fewshot, strict=True)}
+    return {t: int(num_fewshot) for t in tasks}
+
+
+def _extract_metrics(results: dict[str, Any] | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not results:
+        return out
+    for task_name, task_results in results.get("results", {}).items():
+        for key, value in task_results.items():
+            # keys look like "exact_match,none", "acc_norm,none", "exact_match_stderr,none", ...
+            metric, _, filter_name = str(key).partition(",")
+            if metric in _NON_METRIC_KEYS or metric.endswith("_stderr") or not isinstance(value, int | float):
+                continue
+            # A task can report one metric under several filters (gsm8k: strict-match and
+            # flexible-extract); keep them apart. The "none" filter keeps the bare key.
+            suffix = "" if filter_name in ("", "none") else f"_{filter_name}"
+            out[f"{task_name}_{metric}{suffix}"] = float(value)
+    return out
+
+
+# Per-process counter so successive harness calls never overwrite each other's dumps.
+_DUMP_COUNTER = itertools.count()
+
+
+def _dump_generations(results: dict[str, Any] | None, out_dir: str) -> None:
+    """Write one jsonl per generate_until task: prompt sent, raw/filtered response, per-sample metrics."""
+    if not results:
+        return
+    for task_name, entries in (results.get("samples") or {}).items():
+        gen = [e for e in entries if _is_generation_sample(e)]
+        if not gen:
+            continue
+        path = Path(out_dir) / f"{next(_DUMP_COUNTER):03d}_{task_name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            for e in gen:
+                rec = {
+                    "doc_id": e.get("doc_id"),
+                    "filter": e.get("filter"),
+                    "prompt": e["arguments"][0][0],
+                    "response": e.get("filtered_resps"),
+                    "raw_response": e.get("resps"),
+                    "target": e.get("target"),
+                    "metrics": {m: e.get(m) for m in e.get("metrics", [])},
+                }
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+
+
+def _is_generation_sample(entry: dict[str, Any]) -> bool:
+    """generate_until requests carry (context, gen_kwargs dict); loglikelihood ones (context, continuation str)."""
+    try:
+        return isinstance(entry["arguments"][0][1], dict)
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def _samples_for(
+    samples: dict[str, list[int]] | None, group_tasks: list[str]
+) -> dict[str, dict[str, list[int]]]:
+    """Restrict `samples` to the tasks in this few-shot group.
+
+    lm-eval rejects a `samples` mapping naming a task it was not asked to run,
+    and tasks are dispatched one few-shot group at a time, so the mapping has
+    to be narrowed per call. Returns {} when nothing applies, which keeps the
+    kwarg off the call entirely for older lm-eval versions.
+    """
+    if not samples:
+        return {}
+    scoped = {t: samples[t] for t in group_tasks if t in samples}
+    return {"samples": scoped} if scoped else {}
+
+
+def _check_samples_conflict(limit: int | None, samples: dict[str, list[int]] | None) -> None:
+    """lm-eval rejects `limit` and `samples` together; fail with the reason why."""
+    if limit is not None and samples:
+        raise ValueError(
+            "harness_limit cannot be combined with a held-out calibration slice: "
+            "lm-eval accepts either 'limit' or explicit 'samples', not both. "
+            "Set harness_limit to null, or point "
+            "block_extension_params.calibration_dataset at a separate corpus so "
+            "no eval docs are held out."
+        )
+
+
+#: harness_decoding values: "model" (historical) lets the checkpoint's own generation_config shape lm-eval's
+#: generation; "task" makes decoding a property of the evaluation protocol, identical for every model.
+HARNESS_DECODING = ("model", "task")
+
+
+def chat_end_of_turn_token_id(tokenizer: Any) -> int | None:
+    """The special token a chat template closes an assistant turn with (Qwen: ``<|im_end|>``), else ``None``.
+
+    Read from the template itself: render a one-turn exchange and take the first token after the assistant content.
+    """
+    marker = "XQZ"
+    try:
+        text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "u"}, {"role": "assistant", "content": marker}], tokenize=False
+        )
+    except Exception:
+        return None
+    tail = text[text.rfind(marker) + len(marker) :]
+    ids = tokenizer(tail, add_special_tokens=False)["input_ids"] if tail else []
+    if ids and ids[0] in set(getattr(tokenizer, "all_special_ids", ())):
+        return int(ids[0])
+    return None
+
+
+def task_decoding_config(tokenizer: Any, *, apply_chat_template: bool) -> Any:
+    """Neutral generation config for ``harness_decoding="task"``.
+
+    Greedy, no repetition penalty and no ``max_new_tokens`` (so lm-eval's ``max_gen_toks`` is the only length cap);
+    stops at the tokenizer's EOS, its padding token when that is a special token, and, with a chat template, at
+    the template's end-of-turn token. Checkpoints ship
+    different ``generation_config.json`` files (Qwen2.5 base: ``max_new_tokens=2048``; Instruct:
+    ``repetition_penalty=1.1`` and an extra EOS), which ``model.generate`` would otherwise merge into every call.
+    """
+    from transformers import GenerationConfig
+
+    # Stop on every special token that ends text, so the stop set does not depend on which tokenizer of a family
+    # is passed (Qwen2.5 base EOS is <|endoftext|>, Instruct EOS is <|im_end|>; both pad with <|endoftext|>).
+    special = set(getattr(tokenizer, "all_special_ids", ()))
+    candidates = [tokenizer.eos_token_id]
+    if apply_chat_template:
+        candidates.append(chat_end_of_turn_token_id(tokenizer))
+    if tokenizer.pad_token_id in special:
+        candidates.append(tokenizer.pad_token_id)
+    eos = sorted({int(t) for t in candidates if t is not None})
+    return GenerationConfig(
+        do_sample=False,
+        eos_token_id=eos or None,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+    )
+
+
+BUNDLED_TASKS_DIR = Path(__file__).resolve().parent / "lm_eval_tasks"
+_TASK_MANAGERS: dict[str, Any] = {}
+
+
+def _task_manager(include_path: str) -> Any:
+    """lm-eval TaskManager with an extra task directory (``"bundled"`` -> ``BUNDLED_TASKS_DIR``), built once per path."""
+    path = str(BUNDLED_TASKS_DIR if include_path == "bundled" else Path(include_path).resolve())
+    if not Path(path).is_dir():
+        raise ValueError(f"harness_include_path {include_path!r} is not a directory ({path})")
+    if path not in _TASK_MANAGERS:
+        from lm_eval.tasks import TaskManager
+
+        _TASK_MANAGERS[path] = TaskManager(include_path=path)
+    return _TASK_MANAGERS[path]
+
+
+def _preload_numpy_for_code_execution() -> None:
+    """Make numpy importable inside code_eval's test processes.
+
+    code_eval runs each generated program in a process (forkserver start method, the Linux default on Python >= 3.14)
+    after ``reliability_guard`` has disabled many ``os``/builtin functions. A test that imports numpy there (all of
+    HumanEval+, via its ``is_floats`` helper) fails with "'NoneType' object is not callable" unless numpy is already
+    loaded, i.e. preloaded by the forkserver. Our launches (``-c`` / ``-m package``) give the forkserver no
+    ``__main__`` to preload, so every HumanEval+ test failed (pass@1 = 0 for every model, jobs 60731099/60731100).
+    Must run before the forkserver starts; raises if it is already running without numpy preloaded.
+    """
+    import multiprocessing
+    import multiprocessing.forkserver as forkserver
+
+    server = getattr(forkserver, "_forkserver", None)
+    running = getattr(server, "_forkserver_pid", None) is not None
+    preloaded = list(getattr(server, "_preload_modules", []) or [])
+    if running and "numpy" not in preloaded:
+        raise RuntimeError(
+            "harness_confirm_run_unsafe_code: the multiprocessing forkserver is already running without numpy "
+            "preloaded, so code tests that import numpy would fail; it must not be started before the harness."
+        )
+    if "numpy" not in preloaded:
+        multiprocessing.set_forkserver_preload([*preloaded, "numpy"])
+
+
+def _seed_langdetect() -> None:
+    """Make lm-eval's IFEval language checks deterministic.
+
+    ``lm_eval.tasks.ifeval.instructions`` calls ``langdetect.detect`` (language / all-uppercase / all-lowercase
+    instructions), which samples n-grams from an unseeded RNG: identical responses scored in two runs can get
+    different verdicts (observed: 2 of 501 IFEval prompts, smoke job 59637629_5 vs its reference). With a class-level
+    seed every Detector reseeds before each detection.
+    """
+    try:
+        from langdetect import DetectorFactory
+    except ImportError:
+        return
+    DetectorFactory.seed = 0
+
+
+def run(
+    tasks: list[str],
+    model: nn.Module,
+    tokenizer: Any,
+    device: str = "cuda",
+    num_fewshot: int | list[int] | dict[str, int] = 0,
+    batch_size: str = "auto",
+    limit: int | None = None,
+    samples: dict[str, list[int]] | None = None,
+    apply_chat_template: bool = False,
+    system_instruction: str | None = None,
+    dump_generations_dir: str | None = None,
+    decoding: str = "model",
+    confirm_run_unsafe_code: bool = False,
+    include_path: str | None = None,
+) -> dict[str, float]:
+    """
+    Evaluate a causal-LM model on lm-eval harness tasks.
+
+    Parameters
+    ----------
+    tasks : List of task names (e.g. "hellaswag", "piqa", etc.)
+    model : A HuggingFace causal-LM model.
+    tokenizer : Corresponding tokenizer.
+    device : Target device string.
+    num_fewshot : Number of few-shot examples. Either a single int applied to
+        every task, or a list/dict giving a per-task few-shot count (e.g.
+        arc_easy=0, arc_challenge=25, mmlu=5, ...). Tasks sharing the same
+        count are batched into a single `simple_evaluate` call.
+    batch_size : Batch size ("auto" or int).
+    limit : Optional max eval examples per task.
+    samples : Optional explicit doc indices to score per task. Used to keep
+        the scored docs disjoint from the calibration slice carved out of
+        the same task (see `data.llm_calibration`).
+    apply_chat_template : Opt-in. Render prompts with the tokenizer's chat template
+        (few-shot examples become multi-turn when n_shot > 0). Off by default: the
+        simple_evaluate call is then identical to the plain-prompt one.
+    system_instruction : Optional system prompt; only used with apply_chat_template.
+    dump_generations_dir : Opt-in. Directory receiving "<NNN>_<task>.jsonl" with the
+        rendered prompt and response of every generate_until sample.
+    decoding : "model" (default, historical): the checkpoint's generation_config is merged into lm-eval's
+        generate calls. "task": a neutral config (see ``task_decoding_config``) replaces it for the duration of
+        the evaluation, so the same weights decode identically whatever model object carries them.
+    confirm_run_unsafe_code : Opt-in. Lets lm-eval execute model-generated code, which tasks marked ``unsafe_code``
+        (humaneval, mbpp) require to score; they raise without it. Their metric also needs ``HF_ALLOW_CODE_EVAL=1``
+        in the environment.
+    include_path : Opt-in. Extra lm-eval task directory (a ``TaskManager(include_path=...)``); ``"bundled"`` is this
+        package's ``lm_eval_tasks/`` (e.g. ``gsm8k_cot_tolerant``). ``None`` keeps lm-eval's default task registry.
+
+    Returns
+    -------
+    dict[str, float] : Flat "{task}_{metric}" -> value dict, for every
+        non-stderr metric lm-eval reports for each task (e.g. "acc", "acc_norm",
+        "exact_match", "math_verify" ...), whichever apply to the given tasks.
+        Metrics reported under a non-trivial filter are suffixed with it
+        ("gsm8k_exact_match_strict-match", "gsm8k_exact_match_flexible-extract").
+    """
+    try:
+        from lm_eval import simple_evaluate
+        from lm_eval.config.task import TaskConfig
+    except ImportError:
+        raise ImportError(
+            "lm-eval harness requires `lm-eval` to be installed. "
+            "Install with: pip install 'merge-and-rebase[harness]'"
+        ) from None
+
+    _check_samples_conflict(limit, samples)
+    _seed_langdetect()
+    if confirm_run_unsafe_code:
+        _preload_numpy_for_code_execution()
+    if apply_chat_template and getattr(tokenizer, "chat_template", None) is None:
+        raise ValueError(
+            "harness_apply_chat_template=true but the tokenizer has no chat_template; "
+            "use an instruct tokenizer or leave the flag off."
+        )
+
+    if decoding not in HARNESS_DECODING:
+        raise ValueError(f"harness_decoding must be one of {HARNESS_DECODING}, got {decoding!r}")
+
+    model.eval()
+    if hasattr(model, "to"):
+        model.to(device)
+    saved_generation_config = getattr(model, "generation_config", None)
+    if decoding == "task":
+        model.generation_config = task_decoding_config(tokenizer, apply_chat_template=apply_chat_template)
+
+    fewshot_by_task = _resolve_fewshot_by_task(list(tasks), num_fewshot)
+    groups: dict[int, list[str]] = {}
+    for t in tasks:
+        groups.setdefault(fewshot_by_task[t], []).append(t)
+
+    # See _patched_task_config_to_dict docstring: avoids an OOM on group
+    # tasks (e.g. "mmlu") caused by lm_eval deep-copying the live model once
+    # per subtask while dumping config provenance we never read.
+    _original_to_dict = TaskConfig.to_dict
+    TaskConfig.to_dict = _patched_task_config_to_dict
+    try:
+        out: dict[str, float] = {}
+        for n_shot, group_tasks in groups.items():
+            # Opt-in kwargs are added only when requested, so the default call is unchanged.
+            extra: dict[str, Any] = {}
+            if apply_chat_template:
+                extra.update(
+                    apply_chat_template=True,
+                    fewshot_as_multiturn=n_shot > 0,
+                    system_instruction=system_instruction,
+                )
+            if dump_generations_dir:
+                extra["log_samples"] = True
+            if confirm_run_unsafe_code:
+                extra["confirm_run_unsafe_code"] = True
+            if include_path:
+                extra["task_manager"] = _task_manager(include_path)
+            try:
+                results = simple_evaluate(
+                    model="hf",
+                    model_args={
+                        "pretrained": model,
+                        "tokenizer": tokenizer,
+                    },
+                    tasks=list(group_tasks),
+                    num_fewshot=n_shot,
+                    batch_size=batch_size,
+                    device=device,
+                    limit=limit,
+                    **_samples_for(samples, group_tasks),
+                    **extra,
+                )
+            except TypeError:
+                results = simple_evaluate(
+                    model=model,
+                    tokenizer=tokenizer,
+                    tasks=list(group_tasks),
+                    num_fewshot=n_shot,
+                    batch_size=batch_size,
+                    device=device,
+                    limit=limit,
+                    **_samples_for(samples, group_tasks),
+                    **extra,
+                )
+            if dump_generations_dir:
+                _dump_generations(results, dump_generations_dir)
+            out.update(_extract_metrics(results))
+    finally:
+        TaskConfig.to_dict = _original_to_dict
+        if decoding == "task":
+            model.generation_config = saved_generation_config
+
+    return out
+
+
+def score_by_task(results: dict[str, float], tasks: list[str]) -> float:
+    """
+    Average harness metrics into one score, weighting each requested task
+    equally regardless of how many raw metric keys it expands into.
+
+    Without this, a group task like "mmlu" (57 subjects + 5 aggregates, all
+    keyed "mmlu_*") would dominate a flat average over every "{task}_{metric}"
+    key, swamping single-metric tasks like "gsm8k". Each task's own metrics
+    (e.g. "acc" and "acc_norm" for arc_*) are still averaged together first.
+    """
+    task_scores: list[float] = []
+    for t in tasks:
+        prefix = f"{t}_"
+        vals = [v for k, v in results.items() if k.startswith(prefix)]
+        if vals:
+            task_scores.append(sum(vals) / len(vals))
+    return sum(task_scores) / len(task_scores) if task_scores else 0.0

@@ -1,0 +1,14 @@
+This repository is derived from merge-and-rebase
+(https://github.com/apanariello4/merge-and-rebase), licensed under the
+Apache License 2.0; see LICENSE.
+
+Modifications in this fork add a subspace-constrained fine-tuning strategy:
+
+  new    src/merge_and_rebase/finetune/subspace_bases.py
+  new    src/merge_and_rebase/finetune/strategies/subspace.py
+  new    src/merge_and_rebase/finetune/strategies/_subspace_parameterization.py
+  new    src/merge_and_rebase/finetune/configs/SUBSPACE/
+  new    tests/test_subspace_strategy_20261124.py
+  edit   src/merge_and_rebase/finetune/strategies/__init__.py
+  edit   src/merge_and_rebase/finetune/train_vision.py
+  edit   docs/fine-tuning.md

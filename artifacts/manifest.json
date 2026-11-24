@@ -1,0 +1,105 @@
+{
+  "bundles": [
+    {
+      "artifacts": [
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/Cars/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/Cars/full.pt",
+          "sha256": "f6c4c23bf1af1a94299ab8eb6839c75cf7aa3d27ef1625e453c060f99d074ca0",
+          "size_bytes": 605198151,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/Cars/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/DTD/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/DTD/full.pt",
+          "sha256": "558f1cd197cd6983781718c4e854347bd149035b97d483436ef2d509297852f5",
+          "size_bytes": 605191751,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/DTD/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/EuroSAT/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/EuroSAT/full.pt",
+          "sha256": "2e78a6ce2e9bf683bca93188a1ac9ca0a29c730fb17c1d979e7c43ce1dab7a01",
+          "size_bytes": 605191239,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/EuroSAT/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/GTSRB/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/GTSRB/full.pt",
+          "sha256": "d9c23ebb29efbef4dd4d36f3cd7f0fa462e78d4468f926ee36e204ed9018b370",
+          "size_bytes": 605193479,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/GTSRB/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/MNIST/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/MNIST/full.pt",
+          "sha256": "24de2df6a38759b2579389b05622909af55e0ad45797149635157ec00f8ff79f",
+          "size_bytes": 605191047,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/MNIST/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/RESISC45/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/RESISC45/full.pt",
+          "sha256": "65e3e1c6e25aae80045354cb1317350ac04542f1e73f3808fd245f66fef42936",
+          "size_bytes": 605191879,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/RESISC45/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/SUN397/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/SUN397/full.pt",
+          "sha256": "5f8040cb365b3b77df2a8850dab75cf32b7455369c3d93f6164d6e24fdd87dd7",
+          "size_bytes": 605204167,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/SUN397/full.pt"
+        },
+        {
+          "metadata": {
+            "release_notes": "Author fine-tuned ViT-B/32 OpenAI task checkpoint used by the submitted Vision8 Task Arithmetic configuration. Use is subject to the base-model and dataset terms.",
+            "source_path": "finetune/ViT-B-32/openai/SVHN/full.pt"
+          },
+          "name": "full.pt",
+          "path": "finetune/ViT-B-32/openai/SVHN/full.pt",
+          "sha256": "e7f71804bd888ee99d9fdedc6a7e5a30a2e6c1bcfd3af2eeca1fbf387b369bf0",
+          "size_bytes": 605191047,
+          "url": "hf-hub:merge-and-rebase/vision8-checkpoints/finetune/ViT-B-32/openai/SVHN/full.pt"
+        }
+      ],
+      "description": "Eight author fine-tuned checkpoints required to reproduce the Vision8 Table 2 Task Arithmetic cell.",
+      "name": "vision8-table2",
+      "status": "released"
+    }
+  ],
+  "description": "Release manifest for merge-and-rebase benchmark artifacts. Entries become downloadable only after immutable public URLs and SHA-256 digests are recorded.",
+  "schema_version": 1,
+  "url_schemes": [
+    "https://...",
+    "hf-hub:org/repo/path/to/file.pt"
+  ]
+}
