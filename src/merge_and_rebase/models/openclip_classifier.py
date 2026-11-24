@@ -65,6 +65,34 @@ def _resolve_openclip_load_args(cfg: OpenClipBuildConfig) -> tuple[str, str | No
     return model_name, pretrained, (pretrained == "openai")
 
 
+def _require_quick_gelu(model: Any, model_name: str, pretrained: str) -> None:
+    """Refuse a model that silently fell back to plain GELU.
+
+    The OpenAI CLIP weights were trained with QuickGELU. open_clip decides the
+    activation from the architecture name unless it is forced, and a mismatch
+    produces a warning rather than an error: the same tensors load, training
+    runs, and only the benchmark is several points lower. Since nothing
+    downstream can detect that, it is checked here.
+    """
+
+    visual = getattr(model, "visual", None)
+    transformer = getattr(visual, "transformer", None)
+    blocks = getattr(transformer, "resblocks", None)
+    if not blocks:
+        return
+    activation = getattr(blocks[0].mlp, "gelu", None)
+    if activation is None:
+        return
+    if type(activation).__name__ != "QuickGELU":
+        raise RuntimeError(
+            f"{model_name} with pretrained={pretrained!r} loaded with "
+            f"{type(activation).__name__} instead of QuickGELU. Those weights "
+            f"were trained with QuickGELU and score several points lower "
+            f"without it. Check that open_clip accepts force_quick_gelu, or "
+            f"use the '-quickgelu' architecture name."
+        )
+
+
 def _resolve_openai_clip_model_name(model_name: str) -> str:
     return _OPENAI_CLIP_MODEL_NAME_MAP.get(model_name, model_name)
 
@@ -189,7 +217,7 @@ class OpenClipClassifier(nn.Module):
                 openclip_model_name,
                 pretrained="openai",
                 device="cpu",
-                quick_gelu=True,
+                force_quick_gelu=True,
             )
             tokenizer = clip.tokenize
             if cfg.dtype is not None:
@@ -210,12 +238,19 @@ class OpenClipClassifier(nn.Module):
             raise ImportError("open_clip support requires: pip install -e '.[openclip]'") from e
 
         model_name, pretrained, quick_gelu = _resolve_openclip_load_args(cfg)
+        # force_quick_gelu, not quick_gelu: open_clip renamed this and a
+        # `quick_gelu=` keyword silently lands in **model_kwargs without taking
+        # effect. open_clip then warns about the mismatch and proceeds with
+        # plain GELU, which loads the same tensors and costs several accuracy
+        # points. The OpenAI CLIP weights were trained with QuickGELU.
         model, train_preprocess, preprocess = open_clip.create_model_and_transforms(
             model_name,
             pretrained=pretrained,
             device=cfg.device,
-            quick_gelu=quick_gelu,
+            force_quick_gelu=quick_gelu,
         )
+        if quick_gelu:
+            _require_quick_gelu(model, model_name, pretrained)
         tokenizer = open_clip.get_tokenizer(model_name)
 
         # dtype casting

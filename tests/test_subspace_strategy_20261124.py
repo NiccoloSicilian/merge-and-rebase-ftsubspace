@@ -438,3 +438,52 @@ class ReferenceDatasetTest(unittest.TestCase):
         for name in names:
             _vision_spec(name)
             self.assertNotIn(name, VISION8_TASKS)
+
+
+class QuickGeluGuardTest(unittest.TestCase):
+    """The OpenAI weights need QuickGELU, and open_clip only warns about it."""
+
+    def _model(self, activation: nn.Module):
+        block = nn.Module()
+        block.mlp = nn.Module()
+        block.mlp.gelu = activation
+        transformer = nn.Module()
+        transformer.resblocks = nn.ModuleList([block])
+        visual = nn.Module()
+        visual.transformer = transformer
+        model = nn.Module()
+        model.visual = visual
+        return model
+
+    def test_plain_gelu_is_refused(self):
+        from merge_and_rebase.models.openclip_classifier import _require_quick_gelu
+
+        with self.assertRaisesRegex(RuntimeError, "instead of QuickGELU"):
+            _require_quick_gelu(self._model(nn.GELU()), "ViT-B-32", "openai")
+
+    def test_quick_gelu_is_accepted(self):
+        from merge_and_rebase.models.openclip_classifier import _require_quick_gelu
+
+        class QuickGELU(nn.Module):
+            def forward(self, x):
+                return x * torch.sigmoid(1.702 * x)
+
+        _require_quick_gelu(self._model(QuickGELU()), "ViT-B-32", "openai")
+
+    def test_an_unrecognised_shape_is_not_a_failure(self):
+        from merge_and_rebase.models.openclip_classifier import _require_quick_gelu
+
+        _require_quick_gelu(nn.Module(), "custom", "openai")
+
+    def test_the_loader_forces_quick_gelu_for_the_openai_tag(self):
+        import inspect
+        import re
+
+        from merge_and_rebase.models import openclip_classifier
+
+        source = inspect.getsource(openclip_classifier)
+        # A bare `quick_gelu=` keyword lands in **model_kwargs and does nothing,
+        # so match it only when it is not the tail of `force_quick_gelu=`.
+        self.assertIsNone(re.search(r"(?<!force_)quick_gelu=quick_gelu", source))
+        self.assertIn("force_quick_gelu=quick_gelu,", source)
+        self.assertIn("force_quick_gelu=True,", source)
