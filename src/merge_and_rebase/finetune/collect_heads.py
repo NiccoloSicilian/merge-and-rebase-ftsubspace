@@ -74,17 +74,42 @@ def extract_head(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     )
 
 
+def collect_sidecars(root: Path) -> dict[str, dict[str, torch.Tensor]]:
+    """Heads from the per-task files train_text writes beside heads.pt."""
+
+    directory = root / "heads"
+    if not directory.is_dir():
+        return {}
+    heads: dict[str, dict[str, torch.Tensor]] = {}
+    for path in sorted(directory.glob("*.pt")):
+        try:
+            head = torch.load(path, map_location="cpu", weights_only=False)
+        except Exception:
+            continue
+        if isinstance(head, dict) and head:
+            heads[path.stem] = head
+    return heads
+
+
 def collect(
     root: Path, checkpoint: str, tasks: list[str] | None = None
 ) -> dict[str, dict[str, torch.Tensor]]:
-    """One head per task directory under ``root`` that holds ``checkpoint``."""
+    """One head per task, from the sidecars when present, else the checkpoints.
 
+    Sidecars are what current runs write and are cheap to read; the checkpoint
+    path recovers runs made before they existed.
+    """
+
+    sidecars = collect_sidecars(root)
     candidates = sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []
     heads: dict[str, dict[str, torch.Tensor]] = {}
     missing: list[str] = []
     for directory in candidates:
         task = directory.name
         if tasks is not None and task not in tasks:
+            continue
+        if task in sidecars:
+            heads[task] = sidecars[task]
             continue
         path = directory / checkpoint
         if not path.exists():
@@ -99,8 +124,15 @@ def collect(
                 f"missing or were saved under another name, and a merge with a "
                 f"partial head set would be a wrong result, not a partial one."
             )
+    # Sidecars for tasks with no directory of their own still count.
+    for task, head in sidecars.items():
+        if task not in heads and (tasks is None or task in tasks):
+            heads[task] = head
     if not heads:
-        raise RuntimeError(f"no task directory under {root} holds {checkpoint}")
+        raise RuntimeError(
+            f"no head found under {root}: neither heads/<task>.pt nor "
+            f"<task>/{checkpoint}"
+        )
     if missing:
         print(f"  skipped (no {checkpoint}): {', '.join(missing)}")
     return heads

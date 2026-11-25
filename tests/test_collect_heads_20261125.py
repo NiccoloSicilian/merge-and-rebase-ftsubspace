@@ -97,7 +97,7 @@ class CollectTest(unittest.TestCase):
 
     def test_an_empty_tree_is_reported(self):
         with TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "no task directory"):
+            with self.assertRaisesRegex(RuntimeError, "no head found under"):
                 collect(Path(tmp), "subspace_best_ep.pt")
 
     def test_a_bare_state_dict_payload_works(self):
@@ -149,3 +149,42 @@ class CanonicalisationParityTest(unittest.TestCase):
             canonical_param_name("score.modules_to_save.default.weight"), "score.weight"
         )
         self.assertEqual(canonical_param_name("plain.name"), "plain.name")
+
+
+class SidecarTest(unittest.TestCase):
+    """Per-task sidecars are what makes one-task-per-job safe."""
+
+    def test_sidecars_are_preferred_over_checkpoints(self):
+        from merge_and_rebase.finetune.collect_heads import collect
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "rte").mkdir()
+            torch.save({"state_dict": _state(2)}, root / "rte" / "subspace_best_ep.pt")
+            (root / "heads").mkdir()
+            marker = {"classification_head.out_proj.weight": torch.full((2, 8), 7.0)}
+            torch.save(marker, root / "heads" / "rte.pt")
+            heads = collect(root, "subspace_best_ep.pt")
+            self.assertEqual(
+                float(heads["rte"]["classification_head.out_proj.weight"][0, 0]), 7.0
+            )
+
+    def test_a_sidecar_without_a_task_directory_still_counts(self):
+        from merge_and_rebase.finetune.collect_heads import collect
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "heads").mkdir(parents=True)
+            torch.save({"score.weight": torch.randn(2, 8)}, root / "heads" / "snli.pt")
+            self.assertEqual(set(collect(root, "x.pt")), {"snli"})
+
+    def test_trainer_writes_one_file_per_task(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/train_text.py"
+        ).read_text()
+        # Without the sidecars, parallel jobs overwrite one another's heads.
+        self.assertIn('sidecar_dir = heads_path.parent / "heads"', source)
+        self.assertIn('torch.save(head, sidecar_dir / f"{task_name}.pt")', source)
+        # And the combined file folds in every sidecar, not just this run's.
+        self.assertIn('for sidecar in sorted(sidecar_dir.glob("*.pt")):', source)

@@ -15,7 +15,22 @@
 #
 #   python -m merge_and_rebase.finetune.train_text \
 #     --text-config src/merge_and_rebase/finetune/configs/SUBSPACE/text-subspace-t5-base-nli6.yaml \
-#     --tasks rte
+#     --tasks rte#
+# Hyperparameters from the DELTA paper, appendix, language domain:
+#   "batch size of 128, AdamW, learning rate of 3e-4, an iteration-based
+#    cosine-annealing scheduler and a weight decay of 0.01. Like in vision
+#    tasks, we did not apply gradient clipping."
+#
+# text.yaml in this repository is a template, not that configuration: it names
+# google/t5-v1_1-base and sets lr 5e-6, sixty times smaller. With it neither
+# full fine-tuning nor this method gets off chance on RTE.
+#
+# warmup_steps is 0 because the paper describes a plain cosine annealing with
+# no warmup. The template's 200 steps are 10.3 epochs on RTE, which has only 19
+# updates per epoch at an effective batch of 128.
+# This arm matches the paper's rate exactly, so the only difference from
+# the control is the hypothesis space.
+
 common:
   seed: 42
   deterministic: false
@@ -41,13 +56,13 @@ common:
     epochs: 3
     optimizer:
       name: adamw
-    lr: 5.0e-5
+    lr: 3.0e-4
     weight_decay: 0.01
     accumulate_grad_batches: 32
     lr_scheduler:
       name: cosine
-      warmup_steps: 200
-    grad_clip_norm: 1.0
+      warmup_steps: 0
+    grad_clip_norm: 0.0
     early_stopping: false
     early_stopping_patience: 5
 

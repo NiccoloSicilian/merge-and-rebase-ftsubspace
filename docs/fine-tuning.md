@@ -148,12 +148,12 @@ text model forces three differences, each of which changes what is measured:
   head it is randomly initialised, so there is no W₀ to stay near; the
   repository also extracts heads per task rather than merging them.
 
-**Heads, when training one task per job.** `train_text` accumulates the heads
-of the tasks it trained and writes `heads.pt` with a full overwrite, so a run
-of one task per job leaves a file holding a single task and the last job to
-finish wins. The merge needs one head per task, since each task has its own
-label space and heads are never merged. Rebuild the file from the checkpoints
-afterwards:
+**Heads.** Each task has its own label space, so heads are never merged: the
+merge loads one per task. `train_text` writes `heads/<task>.pt` beside
+`heads.pt` and rebuilds the combined file from every sidecar on disk, which is
+what makes one task per job safe -- a single `heads.pt` written by six parallel
+jobs would otherwise keep only the last one. To rebuild the combined file from
+checkpoints produced before the sidecars existed:
 
 ```bash
 python -m merge_and_rebase.finetune.collect_heads \

@@ -1192,8 +1192,29 @@ def main() -> None:
             else:
                 heads_path = out_dir / model_tag / "heads.pt"
             _ensure_dir(heads_path.parent)
-            torch.save(extracted_heads, heads_path)
-            print(f"Saved extracted task heads: {heads_path}")
+            # One file per task first. heads.pt is a single file for the whole
+            # benchmark, so training one task per job -- the only way to use
+            # more than one GPU -- had each job overwrite the others and left
+            # the merge with one head where it needs one per task. A sidecar
+            # per task cannot collide whatever the job layout.
+            sidecar_dir = heads_path.parent / "heads"
+            _ensure_dir(sidecar_dir)
+            for task_name, head in extracted_heads.items():
+                torch.save(head, sidecar_dir / f"{task_name}.pt")
+            # Then the combined file, folding in every sidecar on disk rather
+            # than only this run's tasks.
+            combined: dict[str, Any] = {}
+            for sidecar in sorted(sidecar_dir.glob("*.pt")):
+                try:
+                    combined[sidecar.stem] = torch.load(sidecar, map_location="cpu", weights_only=False)
+                except Exception:
+                    continue
+            combined.update(extracted_heads)
+            torch.save(combined, heads_path)
+            print(
+                f"Saved extracted task heads: {heads_path} "
+                f"({len(combined)} task(s): {', '.join(sorted(combined))})"
+            )
             run_logger.log_event(
                 "artifact_saved",
                 metrics={},
