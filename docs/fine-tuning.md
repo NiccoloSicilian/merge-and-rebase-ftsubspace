@@ -148,6 +148,22 @@ text model forces three differences, each of which changes what is measured:
   head it is randomly initialised, so there is no W₀ to stay near; the
   repository also extracts heads per task rather than merging them.
 
+**Heads, when training one task per job.** `train_text` accumulates the heads
+of the tasks it trained and writes `heads.pt` with a full overwrite, so a run
+of one task per job leaves a file holding a single task and the last job to
+finish wins. The merge needs one head per task, since each task has its own
+label space and heads are never merged. Rebuild the file from the checkpoints
+afterwards:
+
+```bash
+python -m merge_and_rebase.finetune.collect_heads \
+  src/checkpoints/subspace_text/google-t5__t5-base \
+  --checkpoint subspace_best_ep.pt
+```
+
+It refuses to write a partial set when `--tasks` is given, because a merge over
+five of six heads is a wrong result rather than a partial one.
+
 The reference corpus is generic text rather than one of the tasks being merged:
 `reference_dataset` defaults to `wikitext` / `wikitext-103-raw-v1`. Options are
 `k`, `delta`, `batches`, `reference_batches`, `reference_dataset`,
