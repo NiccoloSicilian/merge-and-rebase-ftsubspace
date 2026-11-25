@@ -487,3 +487,39 @@ class QuickGeluGuardTest(unittest.TestCase):
         self.assertIsNone(re.search(r"(?<!force_)quick_gelu=quick_gelu", source))
         self.assertIn("force_quick_gelu=quick_gelu,", source)
         self.assertIn("force_quick_gelu=True,", source)
+
+
+class ReferenceLoaderColumnTest(unittest.TestCase):
+    """The reference set must work without a label space."""
+
+    def test_webdataset_columns_are_detected(self):
+        from merge_and_rebase.finetune.strategies.subspace import (
+            _IMAGE_COLUMNS,
+            _LABEL_COLUMNS,
+        )
+
+        # The mirrors this repo already uses expose jpg/cls, not image/label.
+        self.assertIn("jpg", _IMAGE_COLUMNS)
+        self.assertIn("cls", _LABEL_COLUMNS)
+        # The plain HF convention still wins when both are present.
+        self.assertLess(_IMAGE_COLUMNS.index("image"), _IMAGE_COLUMNS.index("jpg"))
+        self.assertLess(_LABEL_COLUMNS.index("label"), _LABEL_COLUMNS.index("cls"))
+
+    def test_class_names_are_never_required(self):
+        import inspect
+
+        from merge_and_rebase.finetune.strategies import subspace
+
+        source = inspect.getsource(subspace._reference_loader)
+        # A placeholder override skips extraction; strict would raise on a
+        # mirror whose integer labels carry no ClassLabel feature.
+        self.assertIn('classnames_override=("generic",)', source)
+        self.assertIn("strict_classnames=False", source)
+
+    def test_it_does_not_use_the_regularizer_helper(self):
+        import inspect
+
+        from merge_and_rebase.finetune.strategies import subspace
+
+        source = inspect.getsource(subspace)
+        self.assertNotIn("build_vision_regularizer_task_context", source)

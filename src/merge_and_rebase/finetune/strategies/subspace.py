@@ -272,6 +272,89 @@ def _drift(model: nn.Module, before: dict[str, torch.Tensor]) -> float:
         )
 
 
+_IMAGE_COLUMNS = ("image", "jpg", "png", "webp", "img", "jpeg")
+_LABEL_COLUMNS = ("label", "cls", "class", "fine_label", "coarse_label")
+
+
+def _reference_loader(
+    *,
+    reference: str,
+    model: nn.Module,
+    build_cfg: Any,
+    batch_size: int,
+    num_workers: int,
+    val_fraction: float,
+    seed: int,
+    log: Callable[[str], None],
+):
+    """A loader of reference images, built without demanding a label space.
+
+    The regularizers' own helper goes through ``build_vision_loaders`` with its
+    defaults, which require an ``image``/``label`` column pair and a ClassLabel
+    feature to read class names from. Webdataset mirrors use ``jpg``/``cls``
+    with plain integer labels and fail that check.
+
+    The reference statistics are label-free by construction -- they
+    differentiate ``r^T f(x)`` for a random ``r`` -- so neither the label column
+    nor the class names are ever read. The columns are therefore detected from
+    the dataset features, and a single placeholder class name is passed so the
+    extraction is skipped entirely rather than scanning rows to guess a class
+    count that nothing will use.
+    """
+
+    from merge_and_rebase.data.vision_loaders import build_vision_loaders, load_hf_splits
+    from merge_and_rebase.eval.datasets.vision8_14_20 import _vision_spec
+
+    hf_path, hf_config, split_map = _vision_spec(reference)
+    hf_ds = load_hf_splits(
+        hf_path, config=hf_config,
+        requested_splits=tuple(dict.fromkeys(split_map.values())),
+    )
+    columns = set()
+    for split in hf_ds.values():
+        columns |= set(split.features)
+    image_key = next((name for name in _IMAGE_COLUMNS if name in columns), None)
+    label_key = next((name for name in _LABEL_COLUMNS if name in columns), None)
+    if image_key is None:
+        raise RuntimeError(
+            f"{reference} ({hf_path}) exposes no recognisable image column; "
+            f"found {sorted(columns)}"
+        )
+    if label_key is None:
+        # build_vision_loaders needs a column name to hand to its collate; any
+        # present column works because the value is never read.
+        label_key = next(iter(sorted(columns - {image_key})), image_key)
+    log(f"reference {reference}: columns image={image_key!r} label={label_key!r}")
+
+    # Reuse the preprocessing of the model already on the GPU when it exposes
+    # it, rather than loading a second copy of CLIP just for a transform.
+    owner = getattr(model, "module", model)
+    classifier = getattr(owner, "clip_model", None)
+    preprocess = getattr(classifier, "preprocess", None)
+    if preprocess is None:
+        from merge_and_rebase.models.openclip_classifier import OpenClipClassifier
+
+        preprocess = OpenClipClassifier.build(build_cfg).preprocess
+
+    loaders = build_vision_loaders(
+        hf_ds=hf_ds,
+        hf_path=hf_path,
+        preprocess=preprocess,
+        ft_epochs=1,
+        split_map=split_map,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=True,
+        val_fraction=val_fraction,
+        seed=seed,
+        image_key=image_key,
+        label_key=label_key,
+        classnames_override=("generic",),
+        strict_classnames=False,
+    )
+    return loaders.train
+
+
 def _bases(
     *,
     model: nn.Module,
@@ -366,8 +449,6 @@ def _bases(
             name: torch.zeros(param.shape[0], param.shape[0], device=device)
             for name, param in matrices
         }
-        from ..regularizers._vision_collection import build_vision_regularizer_task_context
-
         if build_cfg is None:
             raise RuntimeError(
                 "the subspace strategy needs build_cfg to construct its reference "
@@ -375,13 +456,15 @@ def _bases(
             )
         for index, reference in enumerate(settings["reference_datasets"]):
             log(f"reference gradients on {reference}: {reference_batches} batches")
-            context = build_vision_regularizer_task_context(
-                task=reference,
+            reference_loader = _reference_loader(
+                reference=reference,
+                model=model,
                 build_cfg=build_cfg,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 val_fraction=val_fraction,
                 seed=seed,
+                log=log,
             )
             generator = torch.Generator(device=device).manual_seed(seed + 1 + index)
             # The loader comes from the reference context, but the gradients are
@@ -390,7 +473,7 @@ def _bases(
             partial_inputs, partial_outputs, _ = sb.accumulate_grams(
                 model=model,
                 matrices=matrices,
-                loader=context.loader,
+                loader=reference_loader,
                 batches=reference_batches,
                 kind="reference",
                 device=device,
