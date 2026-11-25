@@ -233,6 +233,12 @@ def accumulate_grams(
             log(f"{kind} statistics: {index + 1}/{batches} batches")
     model.zero_grad(set_to_none=True)
     model.train(was_training)
+    # These forwards ran with gradients enabled, so the runtime feature cache now
+    # holds non-leaf tensors. Release them here, where they were created, rather
+    # than leaving them for whatever runs next.
+    from .strategies._subspace_parameterization import clear_runtime_feature_cache
+
+    clear_runtime_feature_cache(model)
     for name in inputs:
         inputs[name] /= max(seen, 1)
         outputs[name] /= max(seen, 1)

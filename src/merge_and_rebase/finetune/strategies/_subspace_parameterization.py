@@ -25,6 +25,33 @@ from torch.func import functional_call
 
 from ._delta_parameterization import _sync_runtime_feature_cache
 
+_RUNTIME_CACHE_ATTRS = ("_last_visual_features", "_last_image_features", "_last_logits")
+
+
+def clear_runtime_feature_cache(model: nn.Module) -> None:
+    """Drop the cached activations of the last forward pass.
+
+    The vision runtime keeps the last features on the module so downstream code
+    can read them. After a forward run with gradients enabled -- which is how
+    the subspace gathers its statistics -- those attributes hold non-leaf
+    tensors, and ``deepcopy`` refuses them:
+
+        RuntimeError: Only Tensors created explicitly by the user (graph
+        leaves) support the deepcopy protocol
+
+    The plain delta parameterisation never meets this because nothing runs a
+    gradient-enabled forward before it binds. Clearing is safe: the values are
+    a cache of the previous batch, not state.
+    """
+
+    owner = getattr(model, "module", model)
+    for target in (owner, getattr(owner, "clip_model", None)):
+        if target is None:
+            continue
+        for attribute in _RUNTIME_CACHE_ATTRS:
+            if getattr(target, attribute, None) is not None:
+                setattr(target, attribute, None)
+
 
 class _SubspaceModule(nn.Module):
     """The trainable cores, plus the frozen bases they are sandwiched between."""
@@ -173,6 +200,7 @@ def bind_subspace_parameterization(
         input_bases.append(basis)
         output_bases.append(output_basis)
 
+    clear_runtime_feature_cache(model)
     ref_model = deepcopy(model).to(device)
     subspace_module = _SubspaceModule(names, cores, input_bases, output_bases).to(device)
 

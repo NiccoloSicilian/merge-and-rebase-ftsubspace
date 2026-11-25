@@ -523,3 +523,71 @@ class ReferenceLoaderColumnTest(unittest.TestCase):
 
         source = inspect.getsource(subspace)
         self.assertNotIn("build_vision_regularizer_task_context", source)
+
+
+class RuntimeFeatureCacheTest(unittest.TestCase):
+    """A gradient-enabled forward leaves non-leaf tensors that break deepcopy."""
+
+    def _model_with_cache(self):
+        model = _TinyVisual()
+        source = torch.randn(2, 16, requires_grad=True)
+        # A non-leaf tensor: exactly what a forward with gradients enabled
+        # leaves behind on the vision runtime.
+        model._last_visual_features = source * 2
+        model.clip_model = nn.Module()
+        model.clip_model._last_logits = source * 3
+        return model
+
+    def test_a_cached_non_leaf_tensor_breaks_deepcopy(self):
+        from copy import deepcopy
+
+        with self.assertRaisesRegex(RuntimeError, "graph leaves"):
+            deepcopy(self._model_with_cache())
+
+    def test_clearing_makes_the_model_copyable(self):
+        from copy import deepcopy
+
+        from merge_and_rebase.finetune.strategies._subspace_parameterization import (
+            clear_runtime_feature_cache,
+        )
+
+        model = self._model_with_cache()
+        clear_runtime_feature_cache(model)
+        self.assertIsNone(model._last_visual_features)
+        self.assertIsNone(model.clip_model._last_logits)
+        deepcopy(model)
+
+    def test_binding_clears_the_cache_itself(self):
+        model = self._model_with_cache()
+        named = list(model.named_parameters())
+        targets = {"transformer.resblocks.0.weight", "proj"}
+        bind_subspace_parameterization(
+            model=model,
+            named_params=named,
+            bases=_bases_for(named, targets),
+            device=torch.device("cpu"),
+        )
+        self.assertIsNone(model._last_visual_features)
+
+    def test_statistics_release_the_cache(self):
+        from merge_and_rebase.finetune import subspace_bases as bases_module
+
+        model = _TinyVisual()
+        model.clip_model = nn.Module()
+        matrices = bases_module.eligible_matrices(
+            list(model.named_parameters()), {"transformer.resblocks.0.weight", "proj"}
+        )
+        for _, param in matrices:
+            param.requires_grad_(True)
+        loader = [(torch.randn(4, 16), torch.randint(0, 4, (4,))) for _ in range(2)]
+        bases_module.accumulate_grams(
+            model=model,
+            matrices=matrices,
+            loader=loader,
+            batches=2,
+            kind="task",
+            device=torch.device("cpu"),
+        )
+        from copy import deepcopy
+
+        deepcopy(model)  # would raise if the cache still held a non-leaf tensor
