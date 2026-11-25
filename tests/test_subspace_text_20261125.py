@@ -244,3 +244,60 @@ class BranchWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _train_text_importable() -> bool:
+    """train_text pulls the whole data stack; the source-level checks do not."""
+
+    try:
+        import merge_and_rebase.finetune.train_text  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+class SavingTest(unittest.TestCase):
+    """A reparameterised model must be written as the forward pass sees it."""
+
+    @unittest.skipUnless(_train_text_importable(), "train_text needs the data stack")
+    def test_the_getter_is_preferred_when_present(self):
+        from merge_and_rebase.finetune.train_text import _materialized_state_dict
+
+        model = nn.Linear(3, 2)
+        folded = {"weight": torch.ones(2, 3), "bias": torch.ones(2)}
+        model._materialized_state_dict = lambda: folded
+        state = _materialized_state_dict(model)
+        self.assertTrue(torch.equal(state["weight"], torch.ones(2, 3)))
+        self.assertFalse(torch.equal(state["weight"], model.weight.detach()))
+
+    @unittest.skipUnless(_train_text_importable(), "train_text needs the data stack")
+    def test_a_plain_model_falls_through(self):
+        from merge_and_rebase.finetune.train_text import _materialized_state_dict
+
+        model = nn.Linear(3, 2)
+        state = _materialized_state_dict(model)
+        self.assertEqual(set(state), {"weight", "bias"})
+        self.assertTrue(torch.equal(state["weight"], model.weight.detach()))
+
+    def test_the_save_path_calls_it(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/train_text.py"
+        ).read_text()
+        # Writing model.state_dict() directly would store the frozen base
+        # weights and lose every delta the subspace produced.
+        self.assertIn('payload["state_dict"] = _materialized_state_dict(model)', source)
+
+    def test_both_strategy_gates_accept_the_name(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/train_text.py"
+        ).read_text()
+        # One gate validates the config, the other dispatches. Missing either
+        # one fails the run late or lets an unknown name through.
+        self.assertIn('{"full", "linear_probe", "peft_lora", "subspace"}', source)
+        self.assertIn('elif name == "subspace"', source)

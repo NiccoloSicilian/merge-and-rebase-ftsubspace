@@ -336,6 +336,23 @@ def _optimizer_from_name(params, name: str, lr: float, weight_decay: float) -> o
     raise ValueError(f"Unknown optimizer: {name}")
 
 
+def _materialized_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """The weights as the forward pass sees them, not as they are stored.
+
+    A reparameterised model keeps the pre-trained weight frozen and holds the
+    displacement separately, so ``model.state_dict()`` would write the base
+    weights unchanged plus a few parameter tensors nobody downstream reads: the
+    task vector would be zero on every matrix the method touched, and nothing
+    would say so. Strategies that reparameterise expose this getter; the others
+    do not and fall through to the plain state dict.
+    """
+
+    getter = getattr(model, "_materialized_state_dict", None)
+    if callable(getter):
+        return {k: v.detach().cpu() for k, v in getter().items()}
+    return {k: v.detach().cpu() for k, v in model.state_dict().items()}
+
+
 def _configure_text_strategy(
     *,
     model: nn.Module,
@@ -708,7 +725,7 @@ def train_task(
         head_payload = _extract_task_head(model)
 
         if save_format == "full":
-            payload["state_dict"] = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            payload["state_dict"] = _materialized_state_dict(model)
             payload["format"] = "full"
         elif save_format == "head":
             payload["head"] = head_payload
@@ -1075,8 +1092,11 @@ def main() -> None:
                 raise ValueError(f"[{task}] strategy must be a dict.")
             resolve_training_forward_mode(strategy_cfg)
             strategy = str(_get(task_cfg, "strategy.name", "full"))
-            if strategy not in {"full", "linear_probe", "peft_lora"}:
-                raise ValueError(f"[{task}] Unsupported strategy '{strategy}'. Use one of: full, linear_probe, peft_lora")
+            if strategy not in {"full", "linear_probe", "peft_lora", "subspace"}:
+                raise ValueError(
+                    f"[{task}] Unsupported strategy '{strategy}'. Use one of: "
+                    f"full, linear_probe, peft_lora, subspace"
+                )
 
             optimizer_name = str(_get(task_cfg, "train.optimizer.name", "adamw"))
             lr = float(_get(task_cfg, "train.lr", 1e-4))
