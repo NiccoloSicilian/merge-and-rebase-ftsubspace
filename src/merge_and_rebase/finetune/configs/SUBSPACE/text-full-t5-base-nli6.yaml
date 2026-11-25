@@ -1,0 +1,99 @@
+# Plain full fine-tuning on the six NLI tasks: the control for
+# text-subspace-t5-base-nli6.yaml.
+#
+# Backbone google-t5/t5-base, as in the repository's own
+# text-t5-base-scitail-full.yaml. text.yaml names google/t5-v1_1-base, which was
+# pre-trained on C4 alone with no supervised mixture and does not get off chance
+# on a 2.5k-example task like RTE.
+#
+# Identical to the subspace preset in every field except two: strategy.name,
+# and lr at the repository's 5e-6 instead of 5e-5. The rate differs on purpose,
+# since AdamW moves each coordinate by about the learning rate whatever the
+# gradient scale, and a few hundred thousand cores do not belong at the same
+# rate as 198M weights. Each arm runs at the value appropriate to its own
+# parameter count rather than at a shared one that would handicap one of them.
+#
+#   python -m merge_and_rebase.finetune.train_text \
+#     --text-config src/merge_and_rebase/finetune/configs/SUBSPACE/text-full-t5-base-nli6.yaml \
+#     --tasks rte
+
+common:
+  seed: 42
+  deterministic: false
+
+  device: cuda
+  dtype: fp32
+
+  backbone:
+    name: hf_text
+    model_name_or_path: google-t5/t5-base
+    model_arch: t5
+    model_kind: sequence_classification
+    num_labels: 3
+    trust_remote_code: false
+    use_fast_tokenizer: true
+
+  data:
+    batch_size: 4
+    num_workers: 4
+    max_length: 512
+
+  train:
+    epochs: 3
+    optimizer:
+      name: adamw
+    lr: 5.0e-6
+    weight_decay: 0.01
+    accumulate_grad_batches: 32
+    lr_scheduler:
+      name: cosine
+      warmup_steps: 200
+    grad_clip_norm: 1.0
+    early_stopping: false
+    early_stopping_patience: 5
+
+  strategy:
+    name: full
+  output:
+    out_dir: src/checkpoints/finetune_text_base
+    save_format: full             # full | head | peft
+    save_last_epoch: false
+    extract_heads: true
+
+  logging:
+    use_wandb: false
+    project: null
+    entity: null
+    tags: []
+    mode: online
+    local_log_dir: null
+    log_every_n_steps: 50
+    run_name: null
+
+datasets_order:
+  - snli
+  - mnli
+  - sick
+  - qnli
+  - rte
+  - scitail
+
+datasets:
+  snli:
+    train:
+      epochs: 3
+  mnli:
+    train:
+      epochs: 3
+  sick:
+    train:
+      epochs: 20
+  qnli:
+    train:
+      epochs: 3
+  rte:
+    train:
+      epochs: 50
+  scitail:
+    train:
+      epochs: 50
