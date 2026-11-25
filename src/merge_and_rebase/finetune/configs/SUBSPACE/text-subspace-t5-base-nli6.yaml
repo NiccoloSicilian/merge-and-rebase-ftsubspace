@@ -1,5 +1,12 @@
 # Subspace-constrained fine-tuning on the six NLI tasks.
 #
+# Backbone: google-t5/t5-base, the ORIGINAL T5, as in the repository's own
+# text-t5-base-scitail-full.yaml. Not google/t5-v1_1-base, which text.yaml
+# names: v1.1 was pre-trained on C4 alone with no supervised mixture, so it has
+# never seen a downstream task, and neither full fine-tuning nor this method
+# gets off chance on a 2.5k-example task like RTE from there. The original T5
+# was pre-trained on a multi-task mixture that includes GLUE.
+#
 # Same protocol as text.yaml with two deliberate changes: the strategy, and a
 # ten-times larger learning rate. AdamW moves each coordinate by about the
 # learning rate regardless of gradient scale, so ||Delta|| grows like
@@ -18,8 +25,8 @@ common:
 
   backbone:
     name: hf_text
-    model_name_or_path: google/t5-v1_1-base
-    model_arch: auto
+    model_name_or_path: google-t5/t5-base
+    model_arch: t5
     model_kind: sequence_classification
     num_labels: 3
     trust_remote_code: false
@@ -28,7 +35,7 @@ common:
   data:
     batch_size: 4
     num_workers: 4
-    # max_length: 512
+    max_length: 512
 
   train:
     epochs: 3
