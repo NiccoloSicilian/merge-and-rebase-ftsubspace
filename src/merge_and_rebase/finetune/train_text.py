@@ -348,8 +348,16 @@ def _configure_text_strategy(
     scheduler_name: str = "cosine",
     steps: int,
     device: torch.device,
+    task: str | None = None,
+    train_loader: Any = None,
+    tokenizer: Any = None,
+    batch_size: int = 8,
+    seed: int = 42,
+    model_tag: str = "model",
+    cache_root: Any = None,
 ) -> tuple[nn.Module, optim.Optimizer, Any, dict[str, int], dict[str, Any]]:
     cfg = dict(strategy_cfg or {})
+    subspace_info: dict[str, Any] = {}
     name = str(strategy).strip().lower()
     peft_cfg_out: dict[str, Any] = {}
 
@@ -414,8 +422,42 @@ def _configure_text_strategy(
             "modules_to_save": [str(x) for x in modules_to_save] if modules_to_save else [],
         }
 
+    elif name == "subspace":
+        # Reparameterise every eligible matrix as W = W_0 + U C V^T. The helper
+        # leaves exactly the cores and the task head trainable, so the generic
+        # collection below picks up the right set. It has to run before the
+        # optimizer is built: one created over the original tensors would hold
+        # parameters that no longer move.
+        from pathlib import Path
+
+        from .subspace_text import prepare as prepare_text_subspace
+
+        if train_loader is None or tokenizer is None:
+            raise ValueError(
+                "strategy.name='subspace' needs the task loader and the "
+                "tokenizer to estimate its bases; train_text must pass "
+                "train_loader= and tokenizer= into _configure_text_strategy()"
+            )
+        params_cfg = cfg.get("params") if isinstance(cfg.get("params"), dict) else cfg
+        model.to(device)
+        subspace_info = prepare_text_subspace(
+            model=model,
+            settings=params_cfg.get("subspace"),
+            task=str(task),
+            train_loader=train_loader,
+            tokenizer=tokenizer,
+            batch_size=int(batch_size),
+            device=device,
+            seed=int(seed),
+            model_tag=str(model_tag),
+            cache_root=Path(cache_root) if cache_root is not None else Path("."),
+            log=lambda message: print(f"[{task}] subspace: {message}", flush=True),
+        )
+
     else:
-        raise ValueError("strategy.name must be one of: full, linear_probe, peft_lora")
+        raise ValueError(
+            "strategy.name must be one of: full, linear_probe, peft_lora, subspace"
+        )
 
     model.to(device)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -439,6 +481,7 @@ def _configure_text_strategy(
             sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and "lora" in n.lower())
         )
     info["scheduler_name"] = scheduler_name
+    info.update(subspace_info)
 
     return model, opt, scheduler, info, peft_cfg_out
 
@@ -594,6 +637,13 @@ def train_task(
         scheduler_name=scheduler_name,
         steps=total_steps,
         device=dev,
+        task=task,
+        train_loader=train_loader.loader,
+        tokenizer=getattr(train_loader, "tokenizer", None) or tokenizer,
+        batch_size=batch_size,
+        seed=seed,
+        model_tag=_safe_model_tag(build_cfg.model_name_or_path),
+        cache_root=out_dir / _safe_model_tag(build_cfg.model_name_or_path),
     )
     trainable_info = dict(trainable_info)
     trainable_info["forward_mode"] = forward_mode

@@ -1,0 +1,106 @@
+# Subspace-constrained fine-tuning on the six NLI tasks.
+#
+# Same protocol as text.yaml with two deliberate changes: the strategy, and a
+# ten-times larger learning rate. AdamW moves each coordinate by about the
+# learning rate regardless of gradient scale, so ||Delta|| grows like
+# lr*sqrt(#parameters) and the cores are about two orders of magnitude fewer
+# than the matrices they parameterise.
+#
+#   python -m merge_and_rebase.finetune.train_text \
+#     --text-config src/merge_and_rebase/finetune/configs/SUBSPACE/text-subspace-t5-base-nli6.yaml \
+#     --tasks rte
+common:
+  seed: 42
+  deterministic: false
+
+  device: cuda
+  dtype: fp32
+
+  backbone:
+    name: hf_text
+    model_name_or_path: google/t5-v1_1-base
+    model_arch: auto
+    model_kind: sequence_classification
+    num_labels: 3
+    trust_remote_code: false
+    use_fast_tokenizer: true
+
+  data:
+    batch_size: 4
+    num_workers: 4
+    # max_length: 512
+
+  train:
+    epochs: 3
+    optimizer:
+      name: adamw
+    lr: 5.0e-5
+    weight_decay: 0.01
+    accumulate_grad_batches: 32
+    lr_scheduler:
+      name: cosine
+      warmup_steps: 200
+    grad_clip_norm: 1.0
+    early_stopping: false
+    early_stopping_patience: 5
+
+  strategy:
+    name: subspace
+    params:
+      subspace:
+        k: 64
+        delta: 0.01
+        batches: 30
+        reference_batches: 0          # 0 = come batches
+        # Un corpus generico, NON uno dei sei task NLI.
+        reference_dataset: wikitext
+        reference_config: wikitext-103-raw-v1
+        reference_split: train
+        reference_size: 4096
+        max_length: 128
+        one_sided: false
+        no_reference: false
+
+  output:
+    out_dir: src/checkpoints/subspace_text
+    save_format: full             # full | head | peft
+    save_last_epoch: false
+    extract_heads: true
+
+  logging:
+    use_wandb: false
+    project: null
+    entity: null
+    tags: []
+    mode: online
+    local_log_dir: null
+    log_every_n_steps: 50
+    run_name: null
+
+datasets_order:
+  - snli
+  - mnli
+  - sick
+  - qnli
+  - rte
+  - scitail
+
+datasets:
+  snli:
+    train:
+      epochs: 3
+  mnli:
+    train:
+      epochs: 3
+  sick:
+    train:
+      epochs: 20
+  qnli:
+    train:
+      epochs: 3
+  rte:
+    train:
+      epochs: 50
+  scitail:
+    train:
+      epochs: 50

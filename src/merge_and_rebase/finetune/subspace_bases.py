@@ -175,6 +175,7 @@ def accumulate_grams(
     device: torch.device,
     generator: torch.Generator | None = None,
     log: Callable[[str], None] | None = None,
+    objective: Callable[..., torch.Tensor] | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], int]:
     """``E[G^T G]`` and ``E[G G^T]`` over ``batches`` aggregated-batch gradients.
 
@@ -188,6 +189,12 @@ def accumulate_grams(
     over ``r`` probes the whole output Jacobian instead of one direction. That
     matters because a reference set such as ImageNet-21k has a label space the
     task head cannot score.
+
+    ``objective`` overrides both, as ``objective(model, batch, device,
+    generator)`` returning a scalar. Vision batches are ``(images, labels)``
+    pairs read through ``model(images)``; a text model takes
+    ``input_ids``/``attention_mask`` and returns its own loss, so it supplies
+    its own objective rather than bending this one.
     """
 
     inputs = {
@@ -208,18 +215,21 @@ def accumulate_grams(
         except StopIteration:
             iterator = iter(loader)
             batch = next(iterator)
-        images, labels = batch[0], batch[1]
-        images = images.to(device, non_blocking=True)
         model.zero_grad(set_to_none=True)
-        output = model(images)
-        if kind == "task":
-            loss = F.cross_entropy(output, labels.to(device, non_blocking=True))
+        if objective is not None:
+            loss = objective(model, batch, device, generator)
         else:
-            normalized = output / (output.norm(dim=-1, keepdim=True) + 1e-8)
-            probe = torch.randn(
-                normalized.shape[-1], device=device, dtype=torch.float32, generator=generator
-            )
-            loss = (normalized.float() @ probe).sum()
+            images, labels = batch[0], batch[1]
+            images = images.to(device, non_blocking=True)
+            output = model(images)
+            if kind == "task":
+                loss = F.cross_entropy(output, labels.to(device, non_blocking=True))
+            else:
+                normalized = output / (output.norm(dim=-1, keepdim=True) + 1e-8)
+                probe = torch.randn(
+                    normalized.shape[-1], device=device, dtype=torch.float32, generator=generator
+                )
+                loss = (normalized.float() @ probe).sum()
         loss.backward()
         with torch.no_grad():
             for name, param in matrices:

@@ -131,6 +131,41 @@ The TAK and DELTA configs already set `datasets_order` for their suite (`vision8
 
 ## Text
 
+`strategy.name: subspace` is available here too, through
+`finetune/subspace_text.py`. The method is the same -- every eligible matrix is
+reparameterised as W = W₀ + U·C·Vᵀ with bases fixed before training -- but a
+text model forces three differences, each of which changes what is measured:
+
+- **The probe is not on the logits.** The vision reference statistics
+  differentiate rᵀf(x) on a 512-dimensional embedding; a sequence-classification
+  head emits three logits, and a random direction in three dimensions samples
+  the Jacobian far too coarsely. The probe runs on the last hidden state,
+  mean-pooled over the non-padding tokens.
+- **The vocabulary embedding stays out.** It is shared by every expert and on
+  T5 tied to the output head, so it belongs with the frozen remainder.
+  Exclusion is by module type, not only by name.
+- **The classification head trains normally.** Unlike CLIP's frozen zero-shot
+  head it is randomly initialised, so there is no W₀ to stay near; the
+  repository also extracts heads per task rather than merging them.
+
+The reference corpus is generic text rather than one of the tasks being merged:
+`reference_dataset` defaults to `wikitext` / `wikitext-103-raw-v1`. Options are
+`k`, `delta`, `batches`, `reference_batches`, `reference_dataset`,
+`reference_config`, `reference_split`, `reference_size`, `max_length`,
+`one_sided`, `no_reference`, `cache_dir` and `rebuild`.
+
+```bash
+python -m merge_and_rebase.finetune.train_text \
+  --text-config src/merge_and_rebase/finetune/configs/SUBSPACE/text-subspace-t5-base-nli6.yaml \
+  --tasks rte
+```
+
+The preset raises the learning rate from 5e-6 to 5e-5 for the same reason as
+the vision preset: AdamW moves each coordinate by about the learning rate
+regardless of gradient scale, so ‖Δ‖ grows like lr·√(#parameters) and the cores
+are about two orders of magnitude fewer than the matrices they parameterise.
+
+
 ```bash
 python -m merge_and_rebase.finetune.train_text \
   --text-config src/merge_and_rebase/finetune/configs/text-peft.yaml \
