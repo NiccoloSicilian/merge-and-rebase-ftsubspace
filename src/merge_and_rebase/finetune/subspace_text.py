@@ -225,7 +225,23 @@ def reference_loader(
     config = settings["reference_config"] or None
     split = str(settings["reference_split"])
     limit = int(settings["reference_size"])
-    data = load_dataset(name, config, split=split)
+    # Recent `datasets` rejects a bare repository id, so a configured short
+    # name is resolved the same way the NLI loaders resolve theirs.
+    from ..data.text_loaders import canonical_dataset_paths
+
+    data = None
+    errors: list[str] = []
+    for candidate in canonical_dataset_paths(name):
+        try:
+            data = load_dataset(candidate, config, split=split)
+            name = candidate
+            break
+        except Exception as exc:
+            errors.append(f"{candidate}: {type(exc).__name__}: {exc}")
+    if data is None:
+        raise RuntimeError(
+            "could not load the reference corpus. Tried:\n  " + "\n  ".join(errors)
+        )
     column = next(
         (c for c in ("text", "sentence", "content", "document") if c in data.column_names),
         None,

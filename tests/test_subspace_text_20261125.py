@@ -301,3 +301,51 @@ class SavingTest(unittest.TestCase):
         # one fails the run late or lets an unknown name through.
         self.assertIn('{"full", "linear_probe", "peft_lora", "subspace"}', source)
         self.assertIn('elif name == "subspace"', source)
+
+
+class CanonicalDatasetPathTest(unittest.TestCase):
+    """Recent `datasets` rejects bare repository ids."""
+
+    def test_a_bare_name_gains_its_namespace(self):
+        from merge_and_rebase.data.text_loaders import canonical_dataset_paths
+
+        # The short form stays first so an older `datasets` keeps working.
+        self.assertEqual(canonical_dataset_paths("glue"), ("glue", "nyu-mll/glue"))
+        self.assertEqual(canonical_dataset_paths("snli"), ("snli", "stanfordnlp/snli"))
+        self.assertEqual(
+            canonical_dataset_paths("wikitext"), ("wikitext", "Salesforce/wikitext")
+        )
+
+    def test_an_already_namespaced_path_is_left_alone(self):
+        from merge_and_rebase.data.text_loaders import canonical_dataset_paths
+
+        for path in ("allenai/scitail", "yangwang825/sick", "my-org/my-data"):
+            self.assertEqual(canonical_dataset_paths(path), (path,))
+
+    def test_an_unknown_bare_name_is_returned_unchanged(self):
+        from merge_and_rebase.data.text_loaders import canonical_dataset_paths
+
+        self.assertEqual(canonical_dataset_paths("not_a_known_dataset"), ("not_a_known_dataset",))
+
+    def test_every_nli_task_resolves_to_a_namespaced_candidate(self):
+        from merge_and_rebase.data.text_loaders import (
+            _TASK_SPECS,
+            NLI_TASKS,
+            canonical_dataset_paths,
+        )
+
+        for task in NLI_TASKS:
+            candidates = canonical_dataset_paths(_TASK_SPECS[task].hf_path)
+            self.assertTrue(
+                any("/" in candidate for candidate in candidates),
+                f"{task} has no namespaced candidate: {candidates}",
+            )
+
+    def test_the_loader_tries_each_candidate(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/data/text_loaders.py"
+        ).read_text()
+        self.assertIn("for hf_path in canonical_dataset_paths(spec.hf_path):", source)

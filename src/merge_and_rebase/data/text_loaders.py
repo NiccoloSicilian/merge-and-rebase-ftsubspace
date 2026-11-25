@@ -185,6 +185,40 @@ def _to_label_name(raw: Any, spec: _TaskSpec) -> str | None:
     return None
 
 
+# Datasets that used to be reachable by a bare name. Recent `datasets` releases
+# require a namespaced repository id and reject the short form outright:
+#
+#   HfUriError: Invalid HF URI 'hf://datasets/glue@...'.
+#   Repository id must be 'namespace/name', got 'glue'.
+#
+# Both forms are tried so a recipe written against either release still loads.
+_CANONICAL_PATHS: dict[str, str] = {
+    "glue": "nyu-mll/glue",
+    "super_glue": "aps/super_glue",
+    "snli": "stanfordnlp/snli",
+    "multi_nli": "nyu-mll/multi_nli",
+    "sick": "RobZamp/sick",
+    "scitail": "allenai/scitail",
+    "wikitext": "Salesforce/wikitext",
+    "imdb": "stanfordnlp/imdb",
+    "ag_news": "fancyzhx/ag_news",
+}
+
+
+def canonical_dataset_paths(path: str) -> tuple[str, ...]:
+    """The repository ids to try for ``path``, most likely first.
+
+    A bare name is kept as the first candidate so an older `datasets` keeps
+    working, with the namespaced form behind it for the current one.
+    """
+
+    text = str(path)
+    if "/" in text:
+        return (text,)
+    canonical = _CANONICAL_PATHS.get(text)
+    return (text, canonical) if canonical else (text,)
+
+
 def _load_dataset_with_fallbacks(
     *,
     task: str,
@@ -200,17 +234,21 @@ def _load_dataset_with_fallbacks(
         raise ValueError(f"Unsupported split '{split}' for task '{task}'.")
 
     errors: list[str] = []
-    for cfg in spec.hf_configs:
-        for hf_split in spec.split_map[split]:
-            try:
-                if cfg is None:
-                    ds = load_dataset(spec.hf_path, split=hf_split)
-                else:
-                    ds = load_dataset(spec.hf_path, cfg, split=hf_split)
-                return ds, cfg, hf_split
-            except Exception as e:  # pragma: no cover - best-effort fallback path
-                errors.append(f"path={spec.hf_path}, config={cfg}, split={hf_split}: {type(e).__name__}: {e}")
-                continue
+    for hf_path in canonical_dataset_paths(spec.hf_path):
+        for cfg in spec.hf_configs:
+            for hf_split in spec.split_map[split]:
+                try:
+                    if cfg is None:
+                        ds = load_dataset(hf_path, split=hf_split)
+                    else:
+                        ds = load_dataset(hf_path, cfg, split=hf_split)
+                    return ds, cfg, hf_split
+                except Exception as e:  # pragma: no cover - best-effort fallback path
+                    errors.append(
+                        f"path={hf_path}, config={cfg}, split={hf_split}: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    continue
 
     joined = "\n".join(errors[:8])
     raise RuntimeError(f"Failed to load dataset for task '{task}'. Tried:\n{joined}")
