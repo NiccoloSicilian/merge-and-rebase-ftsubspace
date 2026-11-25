@@ -171,30 +171,50 @@ def task_objective(model: nn.Module, batch: dict[str, Any], device, generator=No
     return loss
 
 
+# Decoder first, deliberately. An encoder-decoder's encoder output does not
+# depend on the decoder weights, so probing it would leave every decoder matrix
+# with no reference signal at all -- a denominator of pure ridge, and a basis
+# chosen from the task Grams alone on half the model.
+_HIDDEN_ATTRS = ("decoder_hidden_states", "hidden_states", "encoder_hidden_states")
+_LAST_HIDDEN_ATTRS = ("last_hidden_state", "encoder_last_hidden_state")
+
+
+def _last_hidden_state(outputs: Any) -> tuple[torch.Tensor, str]:
+    """The deepest representation that depends on as much of the model as
+    possible, with the name of where it came from."""
+
+    for attribute in _HIDDEN_ATTRS:
+        states = getattr(outputs, attribute, None)
+        if states:
+            return states[-1], attribute
+    for attribute in _LAST_HIDDEN_ATTRS:
+        state = getattr(outputs, attribute, None)
+        if state is not None:
+            return state, attribute
+    raise RuntimeError(
+        "the model exposes no hidden states, so the reference probe has nothing "
+        "to differentiate. Tried: " + ", ".join(_HIDDEN_ATTRS + _LAST_HIDDEN_ATTRS)
+    )
+
+
 def reference_objective(model: nn.Module, batch: dict[str, Any], device, generator=None):
     """``r^T h(x)`` on the mean-pooled last hidden state.
 
-    Label-free, so a generic corpus needs no annotation. Pooling masks the
-    padding: including it would make the probe depend on batch composition
-    rather than on the model.
+    Label-free, so a generic corpus needs no annotation. The input mask is
+    applied only when it matches the sequence length: on an encoder-decoder the
+    representation that reaches here is the decoder's, whose length is unrelated
+    to the input, and masking it with the encoder's mask would be meaningless.
     """
 
     kwargs = _forward_kwargs(batch, device)
     outputs = model(**kwargs, output_hidden_states=True)
-    hidden = getattr(outputs, "hidden_states", None)
-    if not hidden:
-        raise RuntimeError(
-            "the model returned no hidden states, so the reference probe has "
-            "nothing to differentiate; it only supports models that accept "
-            "output_hidden_states=True"
-        )
-    last = hidden[-1]
+    last, _source = _last_hidden_state(outputs)
     mask = kwargs.get("attention_mask")
-    if mask is None:
-        pooled = last.mean(dim=1)
-    else:
+    if mask is not None and mask.shape[1] == last.shape[1]:
         weights = mask.unsqueeze(-1).to(last.dtype)
         pooled = (last * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+    else:
+        pooled = last.mean(dim=1)
     pooled = pooled / (pooled.norm(dim=-1, keepdim=True) + 1e-8)
     probe = torch.randn(
         pooled.shape[-1], device=device, dtype=torch.float32, generator=generator
@@ -374,6 +394,21 @@ def prepare(
                 batches=reference_batches, kind="reference", device=device,
                 generator=generator, log=log, objective=reference_objective,
             )
+
+        if not values["no_reference"]:
+            # A matrix with a zero reference Gram would be chosen from the task
+            # statistics alone, with the ridge as its only denominator: not the
+            # method, and invisible in the result.
+            blind = [
+                n for n, _ in matrices
+                if float(torch.diagonal(reference_inputs[n]).sum()) <= 0
+            ]
+            if blind:
+                raise RuntimeError(
+                    f"{len(blind)} matrix/matrices received no gradient from the "
+                    f"reference probe, so they have no denominator: {blind[:8]}. "
+                    f"The probe must depend on every matrix in the subspace."
+                )
 
         log("solving the eigenproblems (fp64, on CPU)")
         bases, report = sb.solve_bases(

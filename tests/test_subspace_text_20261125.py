@@ -145,6 +145,55 @@ class ProbeTest(unittest.TestCase):
         self.assertAlmostEqual(float(hidden.grad[0, 2].abs().sum()), 0.0, places=6)
         self.assertGreater(float(hidden.grad[0, 0].abs().sum()), 0.0)
 
+    def test_the_decoder_representation_wins_on_an_encoder_decoder(self):
+        # The encoder output does not depend on the decoder weights, so probing
+        # it would leave every decoder matrix without a denominator.
+        enc = torch.randn(1, 5, 4)
+        dec = torch.randn(1, 1, 4)
+        outputs = type(
+            "Seq2SeqOut", (),
+            {"decoder_hidden_states": [dec], "encoder_hidden_states": [enc],
+             "hidden_states": None, "encoder_last_hidden_state": enc},
+        )()
+        chosen, source = st._last_hidden_state(outputs)
+        self.assertIs(chosen, dec)
+        self.assertEqual(source, "decoder_hidden_states")
+
+    def test_an_encoder_only_model_uses_its_hidden_states(self):
+        hidden = torch.randn(1, 3, 4)
+        outputs = type("Out", (), {"hidden_states": [hidden]})()
+        chosen, source = st._last_hidden_state(outputs)
+        self.assertIs(chosen, hidden)
+        self.assertEqual(source, "hidden_states")
+
+    def test_a_bare_last_hidden_state_is_accepted(self):
+        hidden = torch.randn(1, 3, 4)
+        outputs = type("Out", (), {"last_hidden_state": hidden})()
+        chosen, source = st._last_hidden_state(outputs)
+        self.assertIs(chosen, hidden)
+        self.assertEqual(source, "last_hidden_state")
+
+    def test_the_input_mask_is_ignored_when_lengths_disagree(self):
+        # The decoder length is unrelated to the input length; applying the
+        # encoder mask to it would be meaningless rather than merely wasteful.
+        dec = torch.ones(1, 1, 4, requires_grad=True)
+
+        class _M(nn.Module):
+            def forward(self, input_ids, attention_mask=None, labels=None,
+                        output_hidden_states=False):
+                del input_ids, attention_mask, labels, output_hidden_states
+                return type("Out", (), {"decoder_hidden_states": [dec],
+                                        "hidden_states": None})()
+
+        batch = {
+            "input_ids": torch.zeros(1, 7, dtype=torch.long),
+            "attention_mask": torch.ones(1, 7, dtype=torch.long),
+        }
+        value = st.reference_objective(_M(), batch, torch.device("cpu"),
+                                       torch.Generator().manual_seed(0))
+        value.backward()
+        self.assertGreater(float(dec.grad.abs().sum()), 0.0)
+
     def test_a_model_without_hidden_states_is_reported(self):
         class _M(nn.Module):
             def forward(self, input_ids, attention_mask=None, labels=None,
@@ -155,6 +204,16 @@ class ProbeTest(unittest.TestCase):
         batch = {"input_ids": torch.zeros(1, 2, dtype=torch.long)}
         with self.assertRaisesRegex(RuntimeError, "no hidden states"):
             st.reference_objective(_M(), batch, torch.device("cpu"))
+
+    def test_the_blind_matrix_guard_is_present(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/subspace_text.py"
+        ).read_text()
+        self.assertIn("they have no denominator", source)
+        self.assertIn("The probe must depend on every matrix", source)
 
     def test_the_task_objective_uses_the_models_own_loss(self):
         sentinel = torch.tensor(1.25, requires_grad=True)
