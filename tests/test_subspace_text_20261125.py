@@ -417,7 +417,12 @@ class SampleCountTest(unittest.TestCase):
         # The text presets use batch 4 with gradient accumulation, so the
         # vision default of 30 batches would be 120 samples for a 768x768 Gram.
         values = st.validate(None)
-        self.assertGreaterEqual(values["batches"] * 4, 768)
+        samples = values["batches"] * 4
+        self.assertGreaterEqual(samples, 768)
+        # Clearing the rank threshold is not enough: match vision's five
+        # samples per dimension, since the denominator selects on the small
+        # eigenvalues and those are the noisiest.
+        self.assertGreaterEqual(samples / 768, 5.0)
 
     def test_the_warning_exists_and_names_the_remedy(self):
         from pathlib import Path

@@ -66,7 +66,13 @@ ALLOWED: dict[str, Any] = {
     # batch of 4 with gradient accumulation, so 30 batches -- the vision
     # default, where the batch is 128 -- would be 120 samples for a 768x768
     # Gram.
-    "batches": 400,
+    #
+    # Clearing the rank threshold is not enough: what matters is samples per
+    # dimension. Vision has 3840 for a width of 768, five per dimension. Below
+    # that the small eigenvalues are still noise, and those are exactly the
+    # directions the denominator selects on -- low generic energy is the whole
+    # criterion. 960 batches of 4 reproduce vision's 3840 samples.
+    "batches": 960,
     "reference_batches": 0,
     "reference_dataset": "wikitext",
     "reference_config": "wikitext-103-raw-v1",

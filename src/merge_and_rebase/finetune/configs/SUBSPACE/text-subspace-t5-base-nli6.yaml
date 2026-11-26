@@ -72,7 +72,7 @@ common:
       subspace:
         k: 64
         delta: 0.01
-        batches: 400          # 400 x 4 = 1600 campioni: sopra i 768 della larghezza
+        batches: 960          # 960 x 4 = 3840 campioni, come vision: 5 per dimensione
         reference_batches: 0          # 0 = come batches
         # Un corpus generico, NON uno dei sei task NLI.
         reference_dataset: wikitext
