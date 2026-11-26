@@ -408,3 +408,33 @@ class CanonicalDatasetPathTest(unittest.TestCase):
             / "src/merge_and_rebase/data/text_loaders.py"
         ).read_text()
         self.assertIn("for hf_path in canonical_dataset_paths(spec.hf_path):", source)
+
+
+class SampleCountTest(unittest.TestCase):
+    """A Gram estimated from fewer samples than its width is set by the ridge."""
+
+    def test_the_default_covers_the_width_at_the_text_batch_size(self):
+        # The text presets use batch 4 with gradient accumulation, so the
+        # vision default of 30 batches would be 120 samples for a 768x768 Gram.
+        values = st.validate(None)
+        self.assertGreaterEqual(values["batches"] * 4, 768)
+
+    def test_the_warning_exists_and_names_the_remedy(self):
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "src/merge_and_rebase/finetune/subspace_text.py"
+        ).read_text()
+        self.assertIn("samples = values[\"batches\"] * batch_size", source)
+        self.assertIn("of directions are set by the ridge", source)
+
+    def test_rank_arithmetic(self):
+        # Each batch contributes a gradient of rank at most its batch size.
+        for batches, batch, width, covered in [
+            (30, 128, 768, True),    # vision
+            (30, 4, 768, False),     # the text default before the fix
+            (400, 4, 768, True),     # after
+        ]:
+            self.assertEqual(batches * batch >= width, covered,
+                             f"{batches}x{batch} vs {width}")

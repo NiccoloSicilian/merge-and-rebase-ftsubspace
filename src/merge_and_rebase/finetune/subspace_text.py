@@ -58,7 +58,15 @@ _HEAD = re.compile(
 ALLOWED: dict[str, Any] = {
     "k": 64,
     "delta": 1e-2,
-    "batches": 30,
+    # Enough batches that the Grams are determined by data rather than by the
+    # ridge. Each batch contributes a gradient of rank at most its batch size,
+    # so B batches give a Gram of rank at most B*batch_size; below the width of
+    # the matrix the remaining directions are constrained only by the
+    # regularisation, and the basis there is arbitrary. The text configs use a
+    # batch of 4 with gradient accumulation, so 30 batches -- the vision
+    # default, where the batch is 128 -- would be 120 samples for a 768x768
+    # Gram.
+    "batches": 400,
     "reference_batches": 0,
     "reference_dataset": "wikitext",
     "reference_config": "wikitext-103-raw-v1",
@@ -364,7 +372,17 @@ def prepare(
         for _, p in matrices:
             p.requires_grad_(True)
 
-        log(f"task gradients: {values['batches']} batches")
+        samples = values["batches"] * batch_size
+        width = max(max(p.shape) for _, p in matrices)
+        if samples < width:
+            log(
+                f"WARNING: {samples} samples for Grams up to {width}x{width}. "
+                f"Each batch contributes rank <= its batch size, so {100*(width-samples)/width:.0f}% "
+                f"of directions are set by the ridge, not the data, and the basis "
+                f"there is arbitrary. Raise batches."
+            )
+        log(f"task gradients: {values['batches']} batches of {batch_size} "
+            f"= {samples} samples")
         task_inputs, task_outputs, seen = sb.accumulate_grams(
             model=model, matrices=matrices, loader=train_loader,
             batches=values["batches"], kind="task", device=device, log=log,
