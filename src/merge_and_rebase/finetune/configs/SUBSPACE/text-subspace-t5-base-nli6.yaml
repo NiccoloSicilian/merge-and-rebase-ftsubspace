@@ -71,14 +71,25 @@ common:
     params:
       subspace:
         k: 64
-        delta: 0.01
-        batches: 960          # 960 x 4 = 3840 campioni, come vision: 5 per dimensione
+        delta: 0.1
+        # 30 termini di Gram da 128 campioni ciascuno, esattamente come vision.
+        # I 128 non sono un batch fisico: il gradiente viene accumulato su
+        # 128/4 = 32 batch del loader prima di formare la Gram, quindi la
+        # memoria e quella di un batch da 4 e il risultato identico a uno da 128.
+        batches: 30
+        gram_batch_size: 128
+        # La testa e inizializzata a caso: il gradiente del task la attraversa,
+        # quindi senza riscaldarla A_task misura una lettura lineare casuale.
+        head_warmup_steps: 300
+        head_warmup_lr: 1.0e-3
         reference_batches: 0          # 0 = come batches
         # Un corpus generico, NON uno dei sei task NLI.
         reference_dataset: wikitext
         reference_config: wikitext-103-raw-v1
         reference_split: train
-        reference_size: 4096
+        # Servono 3840 righe (30 x 128) e il filtro ne scarta circa meta,
+        # quindi con 32768 estratte nessun batch di riferimento riusa una riga.
+        reference_size: 32768
         max_length: 128
         one_sided: false
         no_reference: false

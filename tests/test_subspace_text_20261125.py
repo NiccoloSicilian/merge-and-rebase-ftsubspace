@@ -413,33 +413,41 @@ class CanonicalDatasetPathTest(unittest.TestCase):
 class SampleCountTest(unittest.TestCase):
     """A Gram estimated from fewer samples than its width is set by the ridge."""
 
-    def test_the_default_covers_the_width_at_the_text_batch_size(self):
-        # The text presets use batch 4 with gradient accumulation, so the
-        # vision default of 30 batches would be 120 samples for a 768x768 Gram.
+    def test_the_default_matches_vision_s_sample_budget(self):
+        # The budget is batches x gram_batch_size, not batches x the training
+        # batch: gradients are accumulated so each Gram term is as wide as
+        # vision's, at the memory of the training batch.
         values = st.validate(None)
-        samples = values["batches"] * 4
-        self.assertGreaterEqual(samples, 768)
-        # Clearing the rank threshold is not enough: match vision's five
-        # samples per dimension, since the denominator selects on the small
-        # eigenvalues and those are the noisiest.
+        samples = values["batches"] * values["gram_batch_size"]
+        self.assertEqual(samples, 30 * 128)
         self.assertGreaterEqual(samples / 768, 5.0)
 
-    def test_the_warning_exists_and_names_the_remedy(self):
+    def test_the_warning_is_about_variance_not_rank(self):
+        # Rank is not the binding constraint in text: `dL/dW` sums an outer
+        # product per token, so a batch of sequences spans far more directions
+        # than its sample count. Saying otherwise sent an earlier diagnosis
+        # the wrong way, so the wording is pinned.
         from pathlib import Path
 
         source = (
             Path(__file__).resolve().parents[1]
             / "src/merge_and_rebase/finetune/subspace_text.py"
         ).read_text()
-        self.assertIn("samples = values[\"batches\"] * batch_size", source)
-        self.assertIn("of directions are set by the ridge", source)
+        self.assertIn("samples = values[\"batches\"] * effective", source)
+        self.assertIn("sampling spread", source)
+        self.assertIn("sqrt(p/n)", source)
+        self.assertNotIn("of directions are set by the ridge", source)
 
-    def test_rank_arithmetic(self):
-        # Each batch contributes a gradient of rank at most its batch size.
-        for batches, batch, width, covered in [
-            (30, 128, 768, True),    # vision
-            (30, 4, 768, False),     # the text default before the fix
-            (400, 4, 768, True),     # after
-        ]:
-            self.assertEqual(batches * batch >= width, covered,
-                             f"{batches}x{batch} vs {width}")
+    def test_the_spread_the_ridge_has_to_dominate(self):
+        # sqrt(p/n) is the scale of the sampling spread; delta shrinks by
+        # delta/(1+delta). The default must not sit orders of magnitude below.
+        values = st.validate(None)
+        samples = values["batches"] * values["gram_batch_size"]
+        for width in (768, 3072):
+            spread = (width / samples) ** 0.5
+            shrink = values["delta"] / (1 + values["delta"])
+            self.assertGreater(spread, 0.0)
+            # A sanity bound, not an optimum: delta within an order of
+            # magnitude of the spread. Ledoit-Wolf would put the intensity
+            # near p/n, which the heavy-tailed gradient spectrum pulls down.
+            self.assertGreater(shrink * 10, spread, f"delta troppo piccolo a p={width}")

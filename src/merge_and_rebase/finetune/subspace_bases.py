@@ -176,12 +176,32 @@ def accumulate_grams(
     generator: torch.Generator | None = None,
     log: Callable[[str], None] | None = None,
     objective: Callable[..., torch.Tensor] | None = None,
+    micro_batches: int = 1,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], int]:
     """``E[G^T G]`` and ``E[G G^T]`` over ``batches`` aggregated-batch gradients.
 
     Per-sample Grams would be sharper and cost one backward per sample; the
     batch gradient is dominated by the mean direction, which is the one the
     optimizer actually follows.
+
+    ``micro_batches`` decides how wide that mean is. The loss is a sum over the
+    samples and gradients add, so accumulating ``m`` loader batches before
+    forming ``G^T G`` gives exactly the Gram of one batch ``m`` times larger, at
+    the memory of one. That matters because the width is not a free knob: at
+    ``m=1`` with a loader batch of 4 the Gram keeps most of the per-sample
+    variance, while vision's batch of 128 produces a mean-dominated estimate --
+    a different quantity, not a less noisy one. The reference probe draws one
+    ``r`` per *aggregated* batch, so every micro-batch sees the same direction,
+    as a single wide batch would.
+
+    One caveat on magnitude: an objective that averages over its batch -- the
+    task cross entropy does -- yields an accumulated gradient ``micro`` times
+    the wide batch's, same direction. The Gram is then scaled by ``micro^2``
+    uniformly, which ``top_directions`` is invariant to because it solves
+    ``P v = lambda C v`` and both sides, the ridge included, carry the same
+    factor. Everything reported (``energy_ratio``, ``sel``) is a ratio too. The
+    scale is not corrected here because the reference probe sums instead of
+    averaging, so no single correction is right for both.
 
     ``kind='task'``      : the task's own cross entropy.
     ``kind='reference'`` : ``r^T f(x)`` with a fresh random ``r`` per batch.
@@ -209,28 +229,38 @@ def accumulate_grams(
     model.eval()
     iterator = iter(loader)
     seen = 0
+    micro = max(1, int(micro_batches))
     for index in range(batches):
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            iterator = iter(loader)
-            batch = next(iterator)
         model.zero_grad(set_to_none=True)
-        if objective is not None:
-            loss = objective(model, batch, device, generator)
-        else:
-            images, labels = batch[0], batch[1]
-            images = images.to(device, non_blocking=True)
-            output = model(images)
-            if kind == "task":
-                loss = F.cross_entropy(output, labels.to(device, non_blocking=True))
+        # One probe direction per aggregated batch: rewinding the generator
+        # before each micro-batch reproduces what a single wide batch does.
+        state = None if generator is None else generator.get_state()
+        for _ in range(micro):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                iterator = iter(loader)
+                batch = next(iterator)
+            if state is not None:
+                generator.set_state(state)
+            if objective is not None:
+                loss = objective(model, batch, device, generator)
             else:
-                normalized = output / (output.norm(dim=-1, keepdim=True) + 1e-8)
-                probe = torch.randn(
-                    normalized.shape[-1], device=device, dtype=torch.float32, generator=generator
-                )
-                loss = (normalized.float() @ probe).sum()
-        loss.backward()
+                images, labels = batch[0], batch[1]
+                images = images.to(device, non_blocking=True)
+                output = model(images)
+                if kind == "task":
+                    loss = F.cross_entropy(output, labels.to(device, non_blocking=True))
+                else:
+                    normalized = output / (output.norm(dim=-1, keepdim=True) + 1e-8)
+                    probe = torch.randn(
+                        normalized.shape[-1], device=device, dtype=torch.float32,
+                        generator=generator,
+                    )
+                    loss = (normalized.float() @ probe).sum()
+            # Inside the micro loop on purpose: the gradients accumulate into
+            # .grad, so one Gram term below is formed from all `micro` batches.
+            loss.backward()
         with torch.no_grad():
             for name, param in matrices:
                 if param.grad is None:
@@ -353,27 +383,37 @@ def cache_key(
     batches: int,
     reference_datasets: Sequence[str],
     seed: int,
+    gram_batch_size: int = 0,
+    head_warmup_steps: int = 0,
 ) -> str:
     """A name carrying every knob that changes the bases, so two settings can
     never share a file."""
 
-    payload = json.dumps(
-        {
-            "model": model_name,
-            "pretrained": pretrained,
-            "task": task,
-            "k": k,
-            "delta": delta,
-            "one_sided": one_sided,
-            "no_reference": no_reference,
-            "batches": batches,
-            "reference": list(reference_datasets),
-            "seed": seed,
-        },
-        sort_keys=True,
-    )
+    knobs: dict[str, Any] = {
+        "model": model_name,
+        "pretrained": pretrained,
+        "task": task,
+        "k": k,
+        "delta": delta,
+        "one_sided": one_sided,
+        "no_reference": no_reference,
+        "batches": batches,
+        "reference": list(reference_datasets),
+        "seed": seed,
+    }
+    # Added only when set, so the keys of callers that do not use them -- the
+    # vision path -- keep pointing at the bases already on disk.
+    if gram_batch_size:
+        knobs["gram_batch_size"] = gram_batch_size
+    if head_warmup_steps:
+        knobs["head_warmup_steps"] = head_warmup_steps
+    payload = json.dumps(knobs, sort_keys=True)
     digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
     parts = [task, f"k{k}", f"d{delta:g}"]
+    if gram_batch_size:
+        parts.append(f"b{gram_batch_size}")
+    if head_warmup_steps:
+        parts.append(f"w{head_warmup_steps}")
     if one_sided:
         parts.append("1s")
     if no_reference:

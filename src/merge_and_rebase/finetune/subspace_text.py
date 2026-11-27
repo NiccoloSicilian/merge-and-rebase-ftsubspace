@@ -57,22 +57,25 @@ _HEAD = re.compile(
 
 ALLOWED: dict[str, Any] = {
     "k": 64,
-    "delta": 1e-2,
-    # Enough batches that the Grams are determined by data rather than by the
-    # ridge. Each batch contributes a gradient of rank at most its batch size,
-    # so B batches give a Gram of rank at most B*batch_size; below the width of
-    # the matrix the remaining directions are constrained only by the
-    # regularisation, and the basis there is arbitrary. The text configs use a
-    # batch of 4 with gradient accumulation, so 30 batches -- the vision
-    # default, where the batch is 128 -- would be 120 samples for a 768x768
-    # Gram.
-    #
-    # Clearing the rank threshold is not enough: what matters is samples per
-    # dimension. Vision has 3840 for a width of 768, five per dimension. Below
-    # that the small eigenvalues are still noise, and those are exactly the
-    # directions the denominator selects on -- low generic energy is the whole
-    # criterion. 960 batches of 4 reproduce vision's 3840 samples.
-    "batches": 960,
+    # Not only there to keep Cholesky happy: the same term is a shrinkage
+    # estimator with intensity delta/(1+delta), and the sampling spread of a
+    # p x p Gram's spectrum goes as sqrt(p/n). At 1e-2 the ridge sits an order
+    # of magnitude below the noise it should dominate, so the top-k selects
+    # directions where the denominator happens to be underestimated.
+    "delta": 0.1,
+    # Gram terms, each over `gram_batch_size` samples: 30 x 128 = 3840, vision's
+    # own budget. Rank is not what is scarce in text -- `dL/dW` sums an outer
+    # product per token, so one term already spans far more directions than its
+    # sample count. Accuracy is: a p x p Gram from n samples has a spectral
+    # spread of order sqrt(p/n), and the criterion reads the denominator's small
+    # eigenvalues, the noisiest ones. `delta` absorbs what is left.
+    "batches": 30,
+    # Samples per Gram term. The width is not a free knob: at 4 the Gram keeps
+    # most of the per-sample variance, while vision's 128 gives a
+    # mean-dominated estimate -- a different quantity, not a less noisy one.
+    # Gradients are accumulated over `gram_batch_size / batch_size` loader
+    # batches, so this costs the memory of the training batch, not of 128.
+    "gram_batch_size": 128,
     "reference_batches": 0,
     "reference_dataset": "wikitext",
     "reference_config": "wikitext-103-raw-v1",
@@ -81,6 +84,14 @@ ALLOWED: dict[str, Any] = {
     "max_length": 128,
     "one_sided": False,
     "no_reference": False,
+    # `task_objective` differentiates the task loss through the classification
+    # head. Left at its random initialisation that head is noise, so A_task
+    # measures how a random linear readout propagates into the backbone rather
+    # than what the task needs -- CLIP has no such problem, its zero-shot head
+    # is frozen and meaningful from the start. Training the head alone first
+    # also gives the subspace fine-tuning a sensible starting point.
+    "head_warmup_steps": 300,
+    "head_warmup_lr": 1e-3,
     "cache_dir": None,
     "rebuild": False,
 }
@@ -105,6 +116,13 @@ def validate(settings: dict[str, Any] | None) -> dict[str, Any]:
     out["batches"] = int(out["batches"])
     if out["batches"] < 1:
         raise ValueError("strategy.params.subspace.batches must be positive")
+    out["gram_batch_size"] = int(out["gram_batch_size"])
+    if out["gram_batch_size"] < 1:
+        raise ValueError("strategy.params.subspace.gram_batch_size must be positive")
+    out["head_warmup_steps"] = int(out["head_warmup_steps"])
+    if out["head_warmup_steps"] < 0:
+        raise ValueError("strategy.params.subspace.head_warmup_steps must not be negative")
+    out["head_warmup_lr"] = float(out["head_warmup_lr"])
     out["reference_batches"] = int(out["reference_batches"])
     out["reference_size"] = int(out["reference_size"])
     out["max_length"] = int(out["max_length"])
@@ -236,6 +254,61 @@ def reference_objective(model: nn.Module, batch: dict[str, Any], device, generat
     return (pooled.float() @ probe).sum()
 
 
+def warm_up_head(
+    *,
+    model: nn.Module,
+    loader: Iterable[Any],
+    steps: int,
+    lr: float,
+    device: torch.device,
+    log: Callable[[str], None],
+) -> None:
+    """Train the classification head alone, backbone frozen, before the Grams.
+
+    Two things depend on it. ``A_task`` is the gradient of the task loss, which
+    reaches the backbone *through* this head: at random initialisation it
+    reports how an arbitrary linear readout propagates, which is not the task.
+    And the subspace fine-tuning that follows starts from a head that already
+    separates the classes instead of from noise.
+
+    Deliberately no scheduler and no validation: this is not training, it is
+    removing noise from a measurement, and the head is retrained anyway by the
+    caller's own loop.
+    """
+
+    head = head_parameters(model)
+    if steps <= 0 or not head:
+        return
+    for _, parameter in model.named_parameters():
+        parameter.requires_grad_(False)
+    for _, parameter in head:
+        parameter.requires_grad_(True)
+    optimizer = torch.optim.AdamW([p for _, p in head], lr=lr)
+    was_training = model.training
+    model.train()
+    iterator = iter(loader)
+    first = last = float("nan")
+    every = max(1, steps // 5)
+    for step in range(steps):
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            iterator = iter(loader)
+            batch = next(iterator)
+        loss = task_objective(model, batch, device)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        last = float(loss.detach())
+        if step == 0:
+            first = last
+        if (step + 1) % every == 0:
+            log(f"head warm-up: {step + 1}/{steps} loss={last:.4f}")
+    model.zero_grad(set_to_none=True)
+    model.train(was_training)
+    log(f"head warm-up: loss {first:.4f} -> {last:.4f} over {steps} steps")
+
+
 # ── the reference corpus ───────────────────────────────────────────────────
 
 
@@ -354,6 +427,11 @@ def prepare(
     )
     log("  " + ", ".join(f"{c}x({s[0]}x{s[1]})" for s, c in sorted(shapes.items())))
 
+    warm_up_head(
+        model=model, loader=train_loader, steps=values["head_warmup_steps"],
+        lr=values["head_warmup_lr"], device=device, log=log,
+    )
+
     path = Path(values["cache_dir"] or (cache_root / "subspace_bases")) / sb.cache_key(
         model_name=model_tag,
         pretrained="hf",
@@ -368,6 +446,8 @@ def prepare(
             else (f"{values['reference_dataset']}/{values['reference_config']}",)
         ),
         seed=seed,
+        gram_batch_size=values["gram_batch_size"],
+        head_warmup_steps=values["head_warmup_steps"],
     )
     bases = None if values["rebuild"] else sb.load_cached(path, matrices)
     if bases is not None:
@@ -378,21 +458,27 @@ def prepare(
         for _, p in matrices:
             p.requires_grad_(True)
 
-        samples = values["batches"] * batch_size
+        micro = max(1, values["gram_batch_size"] // batch_size)
+        effective = micro * batch_size
+        samples = values["batches"] * effective
         width = max(max(p.shape) for _, p in matrices)
-        if samples < width:
+        if samples < 4 * width:
+            spread = (width / samples) ** 0.5
             log(
-                f"WARNING: {samples} samples for Grams up to {width}x{width}. "
-                f"Each batch contributes rank <= its batch size, so {100*(width-samples)/width:.0f}% "
-                f"of directions are set by the ridge, not the data, and the basis "
-                f"there is arbitrary. Raise batches."
+                f"WARNING: {samples} samples for Grams up to {width}x{width}, so "
+                f"p/n = {width / samples:.2f} and the spectrum's sampling spread "
+                f"is around {100 * spread:.0f}%. delta={values['delta']:g} shrinks "
+                f"by {100 * values['delta'] / (1 + values['delta']):.0f}%; below "
+                f"the spread the top-k selects noise. Raise batches or delta."
             )
-        log(f"task gradients: {values['batches']} batches of {batch_size} "
-            f"= {samples} samples")
+        log(
+            f"task gradients: {values['batches']} Gram terms of {effective} "
+            f"samples ({micro} x {batch_size} accumulated) = {samples} samples"
+        )
         task_inputs, task_outputs, seen = sb.accumulate_grams(
             model=model, matrices=matrices, loader=train_loader,
             batches=values["batches"], kind="task", device=device, log=log,
-            objective=task_objective,
+            objective=task_objective, micro_batches=micro,
         )
         dead = [n for n, _ in matrices if float(torch.diagonal(task_inputs[n]).sum()) <= 0]
         if dead:
@@ -411,12 +497,16 @@ def prepare(
             reference_batches = 0
         else:
             loader = reference_loader(values, tokenizer, batch_size, seed, log)
-            log(f"reference gradients: {reference_batches} batches")
+            log(
+                f"reference gradients: {reference_batches} Gram terms of "
+                f"{effective} samples = {reference_batches * effective} samples"
+            )
             generator = torch.Generator(device=device).manual_seed(seed + 2)
             reference_inputs, reference_outputs, _ = sb.accumulate_grams(
                 model=model, matrices=matrices, loader=loader,
                 batches=reference_batches, kind="reference", device=device,
                 generator=generator, log=log, objective=reference_objective,
+                micro_batches=micro,
             )
 
         if not values["no_reference"]:
@@ -449,6 +539,8 @@ def prepare(
                 "delta": values["delta"], "one_sided": values["one_sided"],
                 "no_reference": values["no_reference"],
                 "task_batches": seen, "reference_batches": reference_batches,
+                "gram_batch_size": effective, "gram_samples": samples,
+                "head_warmup_steps": values["head_warmup_steps"],
                 "reference_dataset": None if values["no_reference"] else values["reference_dataset"],
                 "reference_config": None if values["no_reference"] else values["reference_config"],
                 "probe": "mean-pooled last hidden state",
@@ -495,6 +587,8 @@ def prepare(
         "subspace_delta": values["delta"],
         "subspace_one_sided": values["one_sided"],
         "subspace_no_reference": values["no_reference"],
+        "subspace_gram_batch_size": values["gram_batch_size"],
+        "subspace_head_warmup_steps": values["head_warmup_steps"],
         "subspace_cores": int(sum(c.numel() for c in cores)),
         "subspace_head_params": int(sum(p.numel() for _, p in head_parameters(model))),
     }
