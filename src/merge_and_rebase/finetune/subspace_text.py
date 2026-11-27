@@ -57,12 +57,13 @@ _HEAD = re.compile(
 
 ALLOWED: dict[str, Any] = {
     "k": 64,
-    # Not only there to keep Cholesky happy: the same term is a shrinkage
-    # estimator with intensity delta/(1+delta), and the sampling spread of a
-    # p x p Gram's spectrum goes as sqrt(p/n). At 1e-2 the ridge sits an order
-    # of magnitude below the noise it should dominate, so the top-k selects
-    # directions where the denominator happens to be underestimated.
-    "delta": 0.1,
+    # Two jobs in one term. It keeps Cholesky happy, and it is a shrinkage
+    # estimator with intensity delta/(1+delta) against the sqrt(p/n) sampling
+    # spread of the Gram's spectrum. Kept small on purpose: a large ridge walks
+    # the basis towards the `no_reference` ablation, which is a separate arm,
+    # so the denominator is kept sharp and the spread is fought with samples
+    # instead -- see `reference_batches`.
+    "delta": 1e-2,
     # Gram terms, each over `gram_batch_size` samples: 30 x 128 = 3840, vision's
     # own budget. Rank is not what is scarce in text -- `dL/dW` sums an outer
     # product per token, so one term already spans far more directions than its

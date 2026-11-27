@@ -73,7 +73,10 @@ common:
     params:
       subspace:
         k: 64
-        delta: 0.1
+        # Tenuta piccola: una ridge grande porta la base verso l'ablazione
+        # no_reference, che e un braccio a parte. La dispersione da
+        # campionamento si combatte con i campioni, non con la ridge.
+        delta: 0.01
         # 30 termini di Gram da 128 campioni ciascuno, esattamente come vision.
         # I 128 non sono un batch fisico: il gradiente viene accumulato su
         # 128/4 = 32 batch del loader prima di formare la Gram, quindi la
@@ -84,7 +87,11 @@ common:
         # quindi senza riscaldarla A_task misura una lettura lineare casuale.
         head_warmup_steps: 300
         head_warmup_lr: 1.0e-3
-        reference_batches: 0          # 0 = come batches
+        # 47 x 128 = 6016 campioni, non 3840: le feed-forward di T5 hanno Gram
+        # 3072x3072, dove 3840 campioni sono p/n = 0.8 e lo spettro e quasi
+        # tutto rumore. Solo il denominatore puo crescere -- il numeratore
+        # pesca dal train del task, e rte ne ha 2490 in tutto.
+        reference_batches: 47
         # Un corpus generico, NON uno dei sei task NLI.
         reference_dataset: wikitext
         reference_config: wikitext-103-raw-v1
